@@ -6,6 +6,45 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Multi-provider search, search-result details, and real playback (verified)
 
+## Real-playback bug fix (progressive HLS + remux) and stale provider status
+
+### Reproduced failure
+
+- `POST /api/stream/movie/<vega permalink>?provider=VegaMovies` with the default `.env` (no `STREAMIX_SESSION_MAX_SECONDS`) never returned until a **full VOD transcode** of a 963 MB movie finished: `createSession` awaited FFmpeg exit and `-hls_playlist_type vod` only writes playlists at the end. Play therefore hung on "Resolving stream and preparing HLS..." — the reported blue/stuck state. Verified working earlier only because a 45 s cap env var was set.
+
+### Root causes and fixes (packages/server/src/providers/stream.js)
+
+1. **No progressive playback** → FFmpeg now uses `-hls_list_size 0 -hls_playlist_type event`; `createSession` returns as soon as the video variant playlist and first segment exist (`status: "streaming"`) instead of waiting for process exit; `getMasterPlaylist`/`resolveFile` accept `ready` or `streaming`.
+2. **Always re-encoded** → new `pickStreamMode()` remuxes (`-c:v copy -c:a copy`) when video is H.264 and every audio track is AAC, otherwise transcodes (`libx264`/`aac`). Mode and reason are returned by the API (`streamMode`, `streamModeReason`).
+3. **Master playlist had no video variant** (the client stall) → with `event` playlists FFmpeg's auto-generated master (`-master_pl_name`) contained only `#EXT-X-MEDIA` audio renditions and **never** a `#EXT-X-STREAM-INF`; hls.js parsed zero levels and never requested the variant playlist (browser showed `readyState: 0`, no variant/segment requests). Fix: drop `-master_pl_name` and write the master ourselves (`buildMasterPlaylist`) from the ffprobe data, including `#EXT-X-STREAM-INF` with BANDWIDTH/RESOLUTION/CODECS/AUDIO.
+4. **Duplicate rendition names** → both audio tracks carried the same release-group title, producing two `NAME="VegaMovies.is"` entries; names are now made unique (`<name> (<lang>)`, with a numeric suffix when still duplicated).
+5. **ffprobe ignored source headers** → `probeStreams(ffprobePath, url, headers)` now forwards the resolver's headers (Referer/UA) to ffprobe.
+6. **Stale `/api/providers/status`** → `routes/providers.js` hardcoded `verifiedRealProviderPlayback: false` and the "no extractor ported" blocker. It now derives the flag and the real-provider list from `getProviderStatuses()` and reports `fixtureFallbackEnabled`.
+
+### Verification (observed)
+
+- `POST /api/stream/movie/<permalink>?provider=VegaMovies`, no cap → session in **7.4-11.8 s**, `status=streaming`, `streamMode=remux`, reason `copy (h264 + aac/aac)`, 2 audio tracks, `resolution.status=provider_stream`.
+- Master playlist (immediately after ready): 2 `#EXT-X-MEDIA:TYPE=AUDIO` (unique names, `DEFAULT=YES`/`NO`, `LANGUAGE="hin"`/`"eng"`) + `#EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=856x356,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="group_aud"` → `index_v0.m3u8`.
+- Progressive growth: video segments 273 → 590 within 12 s; variant playlist listed 590 `#EXTINF`. `seg_v0_000.ts` 200 `video/mp2t`.
+- `GET /api/stream/:sid/status` → `streaming`, `streamMode=remux`, `playlistUrl` present.
+- `GET /api/providers/status` → `verifiedRealProviderPlayback=true`, `realPlaybackProviders=["VegaMovies"]`, `fixtureFallbackEnabled=false`.
+- Browser (Puppeteer + Edge, real title): badge "Real source - VegaMovies", `video.duration=888.33 s` (the full movie, not the fixture), `currentTime` advancing, `readyState=4`, `error=null`; requests: master → `index_v0.m3u8` → `index_a0.m3u8` → video+audio segments, all `200`.
+- `npm run test` → **65/65 pass** (added `pickStreamMode` and `buildMasterPlaylist` unit tests; stream tests accept `ready`/`streaming`). `npm run build` → OK.
+
+### Files changed this round
+
+- `packages/server/src/providers/stream.js` (progressive event HLS, `pickStreamMode`, `buildMasterPlaylist`, header-aware probe, unique rendition names, servable `streaming` state)
+- `packages/server/src/routes/stream.js` (`streamMode`/`status` in responses; status endpoint reports mode/stderr)
+- `packages/server/src/routes/providers.js` (status derived from providers; fixture flag)
+- `packages/server/src/index.js` (pass `fixtureFallback` to providers router)
+- `packages/server/src/providers/stream.test.js` (new/updated tests)
+
+### Remaining limitations
+
+- Non-H.264 video or non-AAC audio still requires transcoding (slower start, CPU-heavy); mode is reported so the client can show it.
+- Series episode extraction for VegaMovies is still not ported; other CSX providers (Bollyflix/MoviesDrive/Moviesmod) remain Cloudflare-blocked and unimplemented.
+- Signed provider URLs expire (~3 h); each play re-resolves (never cached).
+
 ### Diagnosed root causes
 
 1. **Search missed titles** — only one provider (CineStream/cinemeta) was searched; the four other CSX providers were never queried. Fixed by adding a second real provider adapter (VegaMovies) and searching all search-capable providers concurrently.

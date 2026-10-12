@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStreamManager, initHlsDir, buildAudioLayout } from "./stream.js";
+import { createStreamManager, initHlsDir, buildAudioLayout, pickStreamMode } from "./stream.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixturePath = resolve(repoRoot, "temp", "fixtures", "multi-audio.mkv");
@@ -27,7 +27,8 @@ test("probe and HLS session exposes two real audio tracks", { timeout: 60000 }, 
   const manager = createStreamManager({ maxConcurrent: 1 });
   const session = await manager.createSession(fixturePath);
 
-  assert.equal(session.status, "ready");
+  assert.ok(["ready", "streaming"].includes(session.status));
+  assert.equal(session.mode, "remux");
   assert.equal(session.audioTracks.length, 2);
   assert.equal(session.audioTracks[0].default, true);
   assert.equal(session.audioTracks[1].default, false);
@@ -92,6 +93,41 @@ test("buildAudioLayout ignores preferred language when no track matches", () => 
   );
   assert.equal(defaultTrackIndex, 0);
   assert.equal(tracks[0].default, true);
+});
+
+test("pickStreamMode remuxes H.264 + AAC and transcodes anything else", () => {
+  const remux = pickStreamMode({ codec_name: "h264" }, [{ codec_name: "aac" }, { codec_name: "aac" }]);
+  assert.equal(remux.mode, "remux");
+  assert.equal(remux.video, "copy");
+  assert.equal(remux.audio, "copy");
+
+  const transcodeVideo = pickStreamMode({ codec_name: "hevc" }, [{ codec_name: "aac" }]);
+  assert.equal(transcodeVideo.mode, "transcode");
+
+  const transcodeAudio = pickStreamMode({ codec_name: "h264" }, [{ codec_name: "ac3" }]);
+  assert.equal(transcodeAudio.mode, "transcode");
+
+  const mixed = pickStreamMode({ codec_name: "h264" }, [{ codec_name: "aac" }, { codec_name: "ac3" }]);
+  assert.equal(mixed.mode, "transcode");
+});
+
+test("buildMasterPlaylist emits a video STREAM-INF and unique audio rendition names", async () => {
+  const { buildMasterPlaylist } = await import("./stream.js");
+  const audios = [{ channels: 2, bit_rate: "128000", codec_name: "aac" }, { channels: 2, bit_rate: "128000", codec_name: "aac" }];
+  const tracks = [
+    { trackId: 0, name: "Release.Group", language: "hin", default: true },
+    { trackId: 1, name: "Release.Group", language: "eng", default: false }
+  ];
+  const master = buildMasterPlaylist({ video: { codec_name: "h264", width: 856, height: 356, bit_rate: "900000" }, audios, tracks });
+
+  assert.match(master, /#EXT-X-STREAM-INF:.*AUDIO="group_aud"/);
+  assert.match(master, /index_v0\.m3u8/);
+  assert.equal((master.match(/#EXT-X-MEDIA:TYPE=AUDIO/g) ?? []).length, 2);
+
+  const names = [...master.matchAll(/NAME="([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(new Set(names).size, names.length);
+  assert.match(names[0], /hin/);
+  assert.match(names[1], /eng/);
 });
 
 test("stream sessions are isolated from each other", { timeout: 60000 }, async () => {

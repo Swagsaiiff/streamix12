@@ -74,6 +74,9 @@ export function streamRouter({
         sessionId: session.sessionId,
         provider: stream.provider,
         resolution: stream.resolution,
+        status: session.status,
+        streamMode: session.mode,
+        streamModeReason: session.streamMode?.reason ?? null,
         audioTracks: session.audioTracks,
         preferredLanguage: session.audioTracks.find((t) => t.default)?.language ?? null,
         title: stream.title,
@@ -117,9 +120,14 @@ export function streamRouter({
     res.json({
       sessionId: session.sessionId,
       status: session.status,
+      streamMode: session.mode,
       audioTracks: session.audioTracks,
       error: session.error,
-      playlistUrl: session.status === "ready" ? `/api/stream/${sessionId}/master.m3u8` : null
+      stderr: session.stderr ? session.stderr.slice(-500) : null,
+      playlistUrl:
+        session.status === "ready" || session.status === "streaming"
+          ? `/api/stream/${sessionId}/master.m3u8`
+          : null
     });
   });
 

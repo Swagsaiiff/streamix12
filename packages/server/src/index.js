@@ -57,7 +57,7 @@ app.use(
     sessionMaxSeconds: config.sessionMaxSeconds
   })
 );
-app.use("/api", providersRouter());
+app.use("/api", providersRouter({ fixtureFallback: config.fixtureFallback }));
 
 app.listen(PORT, async () => {
   logger.info("server.start", { port: PORT, provider: provider.getName(), tmdbEnrichment: enricher.isEnabled ? "enabled" : "disabled" });
