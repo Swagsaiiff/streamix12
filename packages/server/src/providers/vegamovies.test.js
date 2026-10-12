@@ -9,6 +9,7 @@ import {
   extractImdbId,
   extractHostLinks,
   extractDownloadPageLinks,
+  extractLinkPages,
   extractDirectMediaUrls,
   extractPixelDrainUrl,
   isPlaceholderMedia,
@@ -119,6 +120,83 @@ test("pickBestMatch chooses the closest real provider page", () => {
 
 test("normalizeForMatch strips punctuation and case", () => {
   assert.equal(normalizeForMatch("Spider-Man: Across the Spider-Verse!"), "spider man across the spider verse");
+});
+
+test("extractHostLinks ignores CMS noise links", () => {
+  const html = `
+    <a href="https://nexdrive.beer/xmlrpc.php">x</a>
+    <a href="https://nexdrive.beer/wp-json/oembed/1.0/embed?url=x">x</a>
+    <a href="https://nexdrive.beer/feed/">x</a>
+    <a href="https://nexdrive.beer/comments/feed">x</a>
+    <a href="https://nexdrive.beer/genxfm784776180594/">Single Episodes</a>
+  `;
+  const links = extractHostLinks(html);
+  assert.deepEqual(links, ["https://nexdrive.beer/genxfm784776180594/"]);
+});
+
+test("extractLinkPages finds series host links even without dwd-button anchors", () => {
+  const html = `
+    <main>
+      <h3>The Show [Season 1] Single Episodes 480p</h3>
+      <p><a href="/out?u=1" class="x">nope</a></p>
+      <p><a href="https://nexdrive.beer/genxfm111/">&#9889; Single Episodes</a></p>
+      <p><a href="https://nexdrive.beer/genxfm222/">Batch/Zip [3.3GB]</a></p>
+      <p><a href="https://nexdrive.beer/xmlrpc.php">noise</a></p>
+    </main>
+  `;
+  const pages = extractLinkPages(html, "https://vegamovies.gallery/show/");
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].url, "https://nexdrive.beer/genxfm111/");
+  assert.equal(pages[0].kind, "host");
+  assert.match(pages[0].label, /Single Episodes/);
+  assert.equal(pages[1].url, "https://nexdrive.beer/genxfm222/");
+});
+
+test("extractLinkPages still prioritises movie dwd-button download pages", () => {
+  const html = `
+    <a href="https://nexdrive.beer/genxfm1/"><button class="dwd-button">Download Now</button></a>
+    <a href="https://vcloud.beer/abc">V-Cloud</a>
+  `;
+  const pages = extractLinkPages(html, "https://vegamovies.gallery/movie/");
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].url, "https://nexdrive.beer/genxfm1/");
+  assert.equal(pages[0].kind, "download");
+});
+
+test("resolveStream follows a series chain (no dwd-button) to validated media", { timeout: 60000 }, async () => {
+  const mediaUrl =
+    "https://abc.r2.cloudflarestorage.com/hub2/Legend.Of.The.Blue.Sea.S01E01.480p.mkv?X-Amz-Signature=sig";
+  const tokenInner = "https://vcloud.beer/tok9?token=xyz";
+  const encodedToken = Buffer.from(Buffer.from(tokenInner, "utf8").toString("base64"), "utf8").toString("base64");
+  const pages = {
+    "https://vegamovies.gallery/show-season-1/": `
+      <main>
+        <h3>The Show [Season 1] Single Episodes 480p</h3>
+        <p><a href="https://nexdrive.beer/genxfm111/">&#9889; Single Episodes</a></p>
+        <p><a href="https://nexdrive.beer/genxfm222/">Batch/Zip [3.3GB]</a></p>
+      </main>`,
+    "https://nexdrive.beer/genxfm111/": `
+      <a href="https://nexdrive.beer/xmlrpc.php">noise</a>
+      <p><a href="https://vcloud.beer/abc123">V-Cloud</a></p>`,
+    "https://vcloud.beer/abc123": `<script>var url = atob(atob('${encodedToken}'))</script>`,
+    [tokenInner]: `<p>${mediaUrl}</p>`
+  };
+  const provider = new VegaMoviesProvider({ cache: null });
+  provider.getBaseUrl = async () => "https://vegamovies.gallery";
+  provider.fetchText = async (url) => {
+    if (pages[url]) return pages[url];
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  provider.isPlayableMedia = async (url) => url === mediaUrl;
+
+  const source = await provider.resolveStream({
+    id: "/show-season-1/",
+    type: "series",
+    sourceUrl: "https://vegamovies.gallery/show-season-1/"
+  });
+  assert.equal(source.url, mediaUrl);
+  assert.equal(source.mediaType, "mkv");
+  assert.match(source.note, /Single Episodes/);
 });
 
 test("placeholder media (unpkg/site.webm) is excluded from candidates", () => {
@@ -286,13 +364,14 @@ test("extractImdbId finds the imdb title id", () => {
 
 test("extractHostLinks keeps only known file-host links", () => {
   const html = `
-    <a href="https://velvet.nexdrive.beer/genxfm/1/">no</a>
+    <a href="https://nexdrive.beer/genxfm/1/">Single Episodes</a>
     <a href="https://vcloud.beer/tkvksi3i">vc</a>
     <a href="https://fastdl.beer/embed.php?download=ABC">fd</a>
     <a href="https://example.com/other">other</a>
   `;
   const links = extractHostLinks(html);
-  assert.equal(links.length, 2);
+  assert.equal(links.length, 3);
+  assert.ok(links.some((l) => l.includes("nexdrive.beer")));
   assert.ok(links.some((l) => l.includes("vcloud.beer")));
   assert.ok(links.some((l) => l.includes("fastdl.beer")));
 });

@@ -116,9 +116,15 @@ const AUDIO_CODEC_TAGS = {
 export function buildMasterPlaylist({ video, audios, tracks, mode = "remux" }) {
   const lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-INDEPENDENT-SEGMENTS"];
 
+  const normalizeName = (value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
   const seenNames = new Map();
   const uniqueName = (track, i) => {
-    let base = track.language ? `${track.name} (${track.language})` : track.name;
+    const hasLangInName = track.language && normalizeName(track.name).includes(normalizeName(track.language));
+    let base = track.language && !hasLangInName ? `${track.name} (${track.language})` : track.name;
     const count = seenNames.get(base) ?? 0;
     seenNames.set(base, count + 1);
     if (count > 0) base = `${base} #${count + 1}`;

@@ -12,6 +12,48 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Intermittent playback failures: root causes and fixes
 
+## Series playback fix + player redesign
+
+### Series failures (e.g. "Legend of the Blue Sea (2016)") — root cause and fix
+
+Inspected the live VegaMovies series page and chain:
+- Series pages have **no `dwd-button` anchors** (movie-only). Links sit in quality `<h3>` sections as direct host links: `nexdrive.beer/genxfm…` labelled "⚡ Single Episodes" / "Batch/Zip". Our `HOST_PATTERN` **omitted `nexdrive`**, and `extractDownloadPageLinks` only matched `dwd-button` → zero candidates → "no playable media" → 422.
+- Verified the real chain works: series page → `nexdrive` → nested `vcloud` → `atob(atob(...))` token → direct signed media `Legend.Of.The.Blue.Sea.S01E01.480p.Hindi.WEB-DL…mkv` (R2 + workers.dev mirror).
+- Nested pages also contain CMS noise (`xmlrpc.php`, `feed`, `wp-json`, `wp-content`); these are now filtered so they cannot consume the candidate budget.
+
+Changes (`vegamovies.js`):
+- `HOST_PATTERN` extended (`nexdrive`, `gdflix`, `hubdrive`, `driveseed`, `driveleech`, `drivebot`) and a `NOISE_LINK_PATTERN` filter applied in `extractHostLinks`.
+- New `extractLinkPages(html, baseUrl)` returns ordered `{url,label,kind}` link pages for **both** layouts (`dwd-button` movie downloads and series host links), noise-filtered.
+- `resolveStream` now uses `extractLinkPages` (limit 4), follows hosts with noise filtering (limit 6), and reports the chosen page section in the note; per-page failures are logged (`vega.link_page_failed`, `vega.link_pages`).
+- Logging added earlier retained: `vega.title_search`, `vega.title_candidates`, `vega.extraction_candidates`, `vega.ffprobe_check`, `vega.media_validated`, `vega.resolved`, `vega.candidate_failed`, `vega.extraction_failed`.
+
+Verified live: `POST /api/stream/series/tt5766194?provider=CineStream` → 5.8 s, `provider_stream`, mode `remux`, master 200, segment 200 (48 KB). Browser: series plays — "Real source · VegaMovies", `duration=1244.9 s`, `readyState=4`, no media error.
+
+### Player UI redesign
+
+`Player.jsx` rewritten as a modern streaming overlay with a **working** controller (no decorative controls):
+- Cinematic black stage, `object-fit: contain` video, gradient top/bottom overlays.
+- Top bar: Back, title, TEST MODE / "Real source · provider" badges, source note (ellipsised, full text on hover).
+- Bottom controller: play/pause, −10 s / +10 s, **timeline with buffered + played fill and elapsed/total time**, **volume slider + mute**, **audio-track selector**, **language preference**, **playback speed**, **fullscreen**.
+- Controls show on mouse/touch movement and auto-hide after 3 s of inactivity while playing (verified: `visibleOnMove=true`, `hiddenAfterIdle=true`); cursor hides too.
+- Loading spinner during resolution; compact centred error panel (max 420 px — not stretched) with **Retry** and Back.
+- Keyboard: Space/K play-pause, ←/→ ±10 s, M mute, F fullscreen, Esc back; form fields excluded.
+- Session/HLS cleanup preserved (destroy + DELETE session, orphan cleanup on aborted mount).
+
+Fix found during verification: `hls.audioTracks` was read at `MANIFEST_PARSED`, when it is still empty, so the audio selector never rendered. Now subscribed to `Hls.Events.AUDIO_TRACKS_UPDATED` (with `MANIFEST_PARSED` re-sync). Verified in-browser: 2 real tracks (`hin`, `eng`), switching to `eng` keeps playing with no media error. Rendition names no longer duplicate the language (`hin`, not `hin (hin) (hin)`).
+
+### Verification (all observed)
+
+- `npm run test` → **86/86 pass** (added: series host-link collection, noise filtering, `extractLinkPages` movie+series, series chain to validated media, master CODECS output-vs-source, unique rendition names).
+- `npm run build` → OK.
+- Browser: spinner shown; all controls present and functional (speed → 1.5, volume → 0.3, seek, autohide, Back → modal); audio selector with `hin`/`eng` and successful switch; series and movie titles both play real sources; "War Dogs" (no source) shows the compact error panel with a working Retry and an honest message.
+
+### Remaining blockers
+
+- Titles with no close VegaMovies match by title+year still return an explicit error (no fabrication).
+- Series playback uses the first available episode link ("Single Episodes"); full season/episode selection UI is not implemented.
+- Non-H.264/AAC sources transcode (slower start; `streamMode` reports it).
+
 ### Root cause of the intermittent browser stall (found and fixed)
 
 `buildMasterPlaylist` derived `CODECS` from the **source** probe, so a session that **transcoded** a non-H.264 source (e.g. HEVC) advertised `CODECS="hvc1..."` while the HLS variants were actually H.264/AAC. hls.js parsed the master, found no level it could play (HEVC unsupported in the test browser's MSE), requested no variant, and the player sat at `readyState 0` — an intermittent "some titles play, others do not" failure (remux/H.264 titles played; HEVC-source titles stalled). Fix: `buildMasterPlaylist({ ..., mode })` now advertises the **output** codecs (`avc1.4d401f,mp4a.40.2` when transcoding). Verified: `Inception` (HEVC source, `mode=transcode`) now plays in the browser — `duration=172.05s`, `readyState=4`, `error=null`, full segment chain 200.

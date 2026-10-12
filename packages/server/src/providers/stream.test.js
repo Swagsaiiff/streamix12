@@ -150,6 +150,25 @@ test("buildMasterPlaylist advertises output codecs, not source codecs, when tran
   assert.match(remuxed, /CODECS="avc1\.4d401f,mp4a\.40\.2"/);
 });
 
+test("buildMasterPlaylist does not duplicate the language when the track name already contains it", async () => {
+  const { buildMasterPlaylist } = await import("./stream.js");
+  const master = buildMasterPlaylist({
+    video: { codec_name: "h264", width: 1280, height: 720, bit_rate: "2000000" },
+    audios: [
+      { channels: 2, bit_rate: "128000", codec_name: "aac" },
+      { channels: 2, bit_rate: "128000", codec_name: "aac" }
+    ],
+    tracks: [
+      { trackId: 0, name: "hin", language: "hin", default: true },
+      { trackId: 1, name: "Audio 2", language: "eng", default: false }
+    ],
+    mode: "remux"
+  });
+  const names = [...master.matchAll(/NAME="([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(names[0], "hin");
+  assert.equal(names[1], "Audio 2 (eng)");
+});
+
 test("stream sessions are isolated from each other", { timeout: 60000 }, async () => {
   ensureFixture();
   await initHlsDir();

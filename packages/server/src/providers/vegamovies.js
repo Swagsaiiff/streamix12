@@ -4,7 +4,8 @@ import { logger } from "../logger.js";
 const URLS_JSON = "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json";
 const FALLBACK_BASE = "https://vegamovies.gallery";
 const CINEMETA = "https://v3-cinemeta.strem.io";
-const HOST_PATTERN = /(vcloud\.|hubcloud\.|fastdl\.|filebee\.|vegadrive\.|pixeldrain\.|gofile\.)/i;
+const HOST_PATTERN = /(nexdrive\.|vcloud\.|hubcloud\.|fastdl\.|filebee\.|vegadrive\.|pixeldrain\.|gofile\.|gdflix\.|hubdrive\.|driveseed\.|driveleech\.|drivebot\.)/i;
+const NOISE_LINK_PATTERN = /(xmlrpc\.php|wp-json|wp-content|wp-includes|wp-admin|\/feed\/?|comments\/feed|\/comments\/?|\/tag\/|\/category\/|\/page\/\d|\/author\/|\.(css|js|png|jpe?g|svg|ico|webp|gif)(\?|$)|\/wp-login)/i;
 const MEDIA_URL_PATTERN = /https?:\/\/[^\s"'<>\\]+?\.(?:mkv|mp4|m3u8|webm)(?:\?[^\s"'<>\\]*)?/gi;
 const SERIES_HINT = /web-?series|season\s*\d|series/i;
 const PLACEHOLDER_PATTERN = /(unpkg\.com|site\.webm|placeholder|sample\.(?:mp4|webm|mkv))/i;
@@ -62,9 +63,30 @@ export function extractImdbId(html) {
 export function extractHostLinks(html) {
   const links = new Set();
   for (const match of html.matchAll(/href="([^"]+)"/gi)) {
-    if (HOST_PATTERN.test(match[1])) links.add(match[1]);
+    const href = match[1];
+    if (!HOST_PATTERN.test(href)) continue;
+    if (NOISE_LINK_PATTERN.test(href)) continue;
+    links.add(href);
   }
   return Array.from(links);
+}
+
+export function extractLinkPages(html, baseUrl) {
+  const ordered = new Map();
+  for (const match of html.matchAll(/<a\s+([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const href = (match[1].match(/href="([^"]+)"/i) || [])[1];
+    if (!href) continue;
+    const label = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const absolute = href.startsWith("http") ? href : new URL(href, baseUrl).href;
+    if (NOISE_LINK_PATTERN.test(absolute)) continue;
+    const isDownloadButton = /dwd-button/i.test(match[2]);
+    const isHostLink = HOST_PATTERN.test(absolute);
+    if (!isDownloadButton && !isHostLink) continue;
+    if (!ordered.has(absolute)) {
+      ordered.set(absolute, { url: absolute, label: label.slice(0, 60), kind: isDownloadButton ? "download" : "host" });
+    }
+  }
+  return Array.from(ordered.values());
 }
 
 export function extractDownloadPageLinks(html, baseUrl) {
@@ -425,28 +447,39 @@ export class VegaMoviesProvider extends BaseProvider {
 
     const html = await this.fetchText(pageUrl, { headers: { Referer: `${base}/` } });
     const candidates = new Set();
+    let chosenLabel = null;
 
     for (const mediaUrl of extractDirectMediaUrls(html)) candidates.add(mediaUrl);
 
-    const linkPages = extractDownloadPageLinks(html, pageUrl).slice(0, 3);
+    // Movies expose `dwd-button` anchors; series pages link straight to host pages
+    // (e.g. nexdrive) from quality sections. Handle both.
+    const linkPages = extractLinkPages(html, pageUrl).slice(0, 4);
+    logger.info("vega.link_pages", {
+      page: hostOf(pageUrl),
+      count: linkPages.length,
+      kinds: [...new Set(linkPages.map((p) => p.kind))],
+      labels: linkPages.map((p) => p.label).slice(0, 6)
+    });
+
     for (const linkPage of linkPages) {
       if (selectMediaCandidates(candidates).length >= 3) break;
       let linkHtml;
       try {
-        linkHtml = await this.fetchText(linkPage, {
+        linkHtml = await this.fetchText(linkPage.url, {
           headers: { Referer: pageUrl },
           timeoutMs: 12000
         });
       } catch {
+        logger.warn("vega.link_page_failed", { host: hostOf(linkPage.url) });
         continue;
       }
       for (const mediaUrl of extractDirectMediaUrls(linkHtml)) candidates.add(mediaUrl);
 
-      for (const hostLink of extractHostLinks(linkHtml).slice(0, 4)) {
+      for (const hostLink of extractHostLinks(linkHtml).slice(0, 6)) {
         if (selectMediaCandidates(candidates).length >= 3) break;
         try {
           const hostHtml = await this.fetchText(hostLink, {
-            headers: { Referer: linkPage },
+            headers: { Referer: linkPage.url },
             timeoutMs: 12000
           });
           for (const mediaUrl of extractDirectMediaUrls(hostHtml)) candidates.add(mediaUrl);
@@ -468,6 +501,9 @@ export class VegaMoviesProvider extends BaseProvider {
           // individual host failures must not abort resolution
         }
       }
+      if (selectMediaCandidates(candidates).length > 0 && !chosenLabel) {
+        chosenLabel = linkPage.label;
+      }
     }
 
     const ranked = selectMediaCandidates(candidates);
@@ -487,7 +523,9 @@ export class VegaMoviesProvider extends BaseProvider {
           headers: { Referer: `${base}/` },
           mediaType: candidate.includes(".m3u8") ? "hls" : "mkv",
           sourceType: "provider",
-          note: "Resolved from VegaMovies (real provider source)"
+          note: chosenLabel
+            ? `Resolved from VegaMovies (real provider source; page section: "${chosenLabel}")`
+            : "Resolved from VegaMovies (real provider source)"
         };
       }
     }
