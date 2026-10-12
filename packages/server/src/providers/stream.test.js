@@ -130,6 +130,26 @@ test("buildMasterPlaylist emits a video STREAM-INF and unique audio rendition na
   assert.match(names[1], /eng/);
 });
 
+test("buildMasterPlaylist advertises output codecs, not source codecs, when transcoding", async () => {
+  const { buildMasterPlaylist } = await import("./stream.js");
+  const hevcSource = { codec_name: "hevc", width: 828, height: 378, bit_rate: "900000" };
+  const ac3Audio = [{ channels: 2, bit_rate: "192000", codec_name: "ac3" }];
+  const tracks = [{ trackId: 0, name: "Hindi", language: "hin", default: true }];
+
+  const transcoded = buildMasterPlaylist({ video: hevcSource, audios: ac3Audio, tracks, mode: "transcode" });
+  assert.match(transcoded, /CODECS="avc1\.4d401f,mp4a\.40\.2"/);
+  assert.doesNotMatch(transcoded, /hvc1/);
+  assert.doesNotMatch(transcoded, /ac-3/);
+
+  const remuxed = buildMasterPlaylist({
+    video: { codec_name: "h264", width: 1280, height: 720, bit_rate: "2000000" },
+    audios: [{ channels: 2, bit_rate: "128000", codec_name: "aac" }],
+    tracks,
+    mode: "remux"
+  });
+  assert.match(remuxed, /CODECS="avc1\.4d401f,mp4a\.40\.2"/);
+});
+
 test("stream sessions are isolated from each other", { timeout: 60000 }, async () => {
   ensureFixture();
   await initHlsDir();

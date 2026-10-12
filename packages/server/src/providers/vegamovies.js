@@ -1,4 +1,5 @@
 import { BaseProvider, ProviderError } from "./base.js";
+import { logger } from "../logger.js";
 
 const URLS_JSON = "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json";
 const FALLBACK_BASE = "https://vegamovies.gallery";
@@ -177,6 +178,41 @@ export function pickBestMatch(items, { title, year, minScore = 400 } = {}) {
   return bestScore >= minScore ? { item: best, score: bestScore } : null;
 }
 
+export function rankTitleCandidates(items, { title, year = null, type = null, minScore = 400, limit = 5 } = {}) {
+  const scored = [];
+  for (const item of items) {
+    let score = scoreTitleMatch(title, item.title, item.year, year);
+    if (score <= 0) continue;
+    if (type && item.type) {
+      score += item.type === type ? 90 : -120;
+    }
+    if (score >= minScore) scored.push({ item, score });
+  }
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (Number(b.item.year) || 0) - (Number(a.item.year) || 0);
+  });
+
+  const seen = new Set();
+  const unique = [];
+  for (const entry of scored) {
+    const key = entry.item.id ?? `${entry.item.title}:${entry.item.year}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(entry);
+    if (unique.length >= limit) break;
+  }
+  return unique;
+}
+
+export function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
 function absoluteUrl(base, value) {
   if (!value) return null;
   if (/^https?:\/\//i.test(value)) return value;
@@ -313,25 +349,71 @@ export class VegaMoviesProvider extends BaseProvider {
       throw new ProviderError("title is required for title-based resolution", "validation");
     }
     const items = await this.search(title);
-    const candidates = items.filter((item) => !type || item.type === type);
-    const best = pickBestMatch(candidates.length > 0 ? candidates : items, { title, year });
-    if (!best) {
+    logger.info("vega.title_search", { query: title, year, type, results: items.length });
+
+    const ranked = rankTitleCandidates(items, { title, year, type });
+    if (ranked.length === 0) {
+      logger.warn("vega.title_no_match", {
+        query: title,
+        year,
+        type,
+        sample: items.slice(0, 5).map((item) => `${item.title} (${item.year ?? "?"})`)
+      });
       throw new ProviderError(
-        `VegaMovies has no close match for "${title}"${year ? ` (${year})` : ""}`,
+        `VegaMovies has no close match for "${title}"${year ? ` (${year})` : ""} among ${items.length} result(s)`,
         "not_found"
       );
     }
 
-    const detail = await this.getDetails(best.item.type, best.item.id);
-    const source = await this.resolveStream(detail);
-    return {
-      ...source,
-      note: `Resolved via VegaMovies title match: "${best.item.title}"${best.item.year ? ` (${best.item.year})` : ""}, match score ${best.score}`,
-      matchedTitle: best.item.title,
-      matchedYear: best.item.year ?? null,
-      matchScore: best.score,
-      pageUrl: detail.sourceUrl
-    };
+    logger.info("vega.title_candidates", {
+      query: title,
+      candidates: ranked.map(({ item, score }) => `${item.title} (${item.year ?? "?"}) [${item.type}] score=${score}`)
+    });
+
+    const attempts = [];
+    for (const [index, { item, score }] of ranked.entries()) {
+      try {
+        const detail = await this.getDetails(item.type, item.id);
+        const source = await this.resolveStream(detail);
+        logger.info("vega.resolved", {
+          query: title,
+          matched: item.title,
+          matchedYear: item.year ?? null,
+          score,
+          attempt: index + 1,
+          candidatesTried: attempts.length + 1,
+          mediaType: source.mediaType ?? null,
+          host: hostOf(source.url)
+        });
+        return {
+          ...source,
+          note: `Resolved via VegaMovies title match: "${item.title}"${item.year ? ` (${item.year})` : ""}, score ${score} (candidate ${index + 1} of ${ranked.length})`,
+          matchedTitle: item.title,
+          matchedYear: item.year ?? null,
+          matchScore: score,
+          pageUrl: detail.sourceUrl,
+          attempts: attempts.concat([{ title: item.title, id: item.id, score, ok: true }])
+        };
+      } catch (err) {
+        attempts.push({ title: item.title, id: item.id, score, ok: false, error: err.message });
+        logger.warn("vega.candidate_failed", {
+          query: title,
+          candidate: item.title,
+          candidateYear: item.year ?? null,
+          score,
+          attempt: index + 1,
+          code: err.code ?? "error",
+          reason: String(err.message ?? "").slice(0, 200)
+        });
+      }
+    }
+
+    throw new ProviderError(
+      `VegaMovies matched ${ranked.length} candidate(s) for "${title}"${year ? ` (${year})` : ""} but none yielded a validated playable source: ${attempts
+        .map((a) => `${a.title}${a.error ? ` (${String(a.error).slice(0, 60)})` : ""}`)
+        .join("; ")}`,
+      "unsupported"
+    );
   }
 
   async resolveStream(detail) {
@@ -388,8 +470,18 @@ export class VegaMoviesProvider extends BaseProvider {
       }
     }
 
-    for (const candidate of selectMediaCandidates(candidates)) {
-      if (await this.isPlayableMedia(candidate, pageUrl)) {
+    const ranked = selectMediaCandidates(candidates);
+    logger.info("vega.extraction_candidates", {
+      page: hostOf(pageUrl),
+      total: ranked.length,
+      hosts: [...new Set(ranked.map((url) => hostOf(url)).filter(Boolean))]
+    });
+
+    for (const candidate of ranked) {
+      const playable = await this.isPlayableMedia(candidate, pageUrl);
+      logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable });
+      if (playable) {
+        logger.info("vega.media_validated", { host: hostOf(candidate), mediaType: candidate.includes(".m3u8") ? "hls" : "mkv" });
         return {
           url: candidate,
           headers: { Referer: `${base}/` },
@@ -400,8 +492,13 @@ export class VegaMoviesProvider extends BaseProvider {
       }
     }
 
+    logger.warn("vega.extraction_failed", {
+      page: hostOf(pageUrl),
+      candidates: ranked.length,
+      sampleHosts: [...new Set(ranked.map((url) => hostOf(url)).filter(Boolean))].slice(0, 5)
+    });
     throw new ProviderError(
-      "VegaMovies detail page was fetched but no playable media URL could be extracted (host chain did not yield direct media)",
+      `VegaMovies detail page was fetched but none of ${ranked.length} candidate media URL(s) passed ffprobe validation`,
       "unsupported"
     );
   }

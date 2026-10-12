@@ -113,7 +113,7 @@ const AUDIO_CODEC_TAGS = {
   mp3: "mp4a.40.34"
 };
 
-export function buildMasterPlaylist({ video, audios, tracks }) {
+export function buildMasterPlaylist({ video, audios, tracks, mode = "remux" }) {
   const lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-INDEPENDENT-SEGMENTS"];
 
   const seenNames = new Map();
@@ -146,9 +146,14 @@ export function buildMasterPlaylist({ video, audios, tracks }) {
   const videoBitrate = Number(video?.bit_rate) || width * height * 3 || 1500000;
   const bandwidth = videoBitrate + audioBitrate;
 
+  // CODECS must describe the OUTPUT, not the source: when we transcode, the HLS video is
+  // H.264 and the audio is AAC regardless of what the source container used.
+  const outVideoCodec = mode === "remux" ? video?.codec_name : "h264";
+  const outAudioCodec = mode === "remux" ? audios[0]?.codec_name : "aac";
+
   const streamInf = [`BANDWIDTH=${bandwidth}`];
   if (width && height) streamInf.push(`RESOLUTION=${width}x${height}`);
-  const codecs = [VIDEO_CODEC_TAGS[video?.codec_name], AUDIO_CODEC_TAGS[audios[0]?.codec_name]].filter(Boolean);
+  const codecs = [VIDEO_CODEC_TAGS[outVideoCodec], AUDIO_CODEC_TAGS[outAudioCodec]].filter(Boolean);
   if (codecs.length > 0) streamInf.push(`CODECS="${codecs.join(",")}"`);
   streamInf.push(`AUDIO="group_aud"`);
 
@@ -328,7 +333,7 @@ export function createStreamManager({
 
         await writeFile(
           join(sessionDir, MASTER_PLAYLIST),
-          buildMasterPlaylist({ video, audios, tracks }),
+          buildMasterPlaylist({ video, audios, tracks, mode: mode.mode }),
           "utf8"
         );
 

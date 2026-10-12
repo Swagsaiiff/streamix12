@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { ProviderError } from "./base.js";
 import {
   cleanVegaTitle,
   parseVegaSearch,
@@ -16,8 +17,77 @@ import {
   normalizeForMatch,
   scoreTitleMatch,
   pickBestMatch,
+  rankTitleCandidates,
   VegaMoviesProvider
 } from "./vegamovies.js";
+
+test("rankTitleCandidates ranks by score, prefers the requested type, and dedupes", () => {
+  const items = [
+    { id: "/a/", title: "War Dogs", year: 2016, type: "series" },
+    { id: "/b/", title: "War Dogs", year: 2016, type: "movie" },
+    { id: "/c/", title: "Dogs of War", year: 2023, type: "movie" },
+    { id: "/a/", title: "War Dogs", year: 2016, type: "series" }
+  ];
+  const ranked = rankTitleCandidates(items, { title: "War Dogs", year: 2016, type: "movie" });
+  assert.equal(ranked[0].item.id, "/b/");
+  assert.equal(ranked[0].item.type, "movie");
+  assert.equal(ranked.filter((entry) => entry.item.id === "/a/").length, 1);
+});
+
+test("resolveByTitle tries the next candidate when the first fails extraction", { timeout: 30000 }, async () => {
+  const first = { id: "/war-dogs-2000/", title: "War Dogs", year: 2016, type: "movie" };
+  const second = { id: "/war-dogs-2016/", title: "War Dogs", year: 2016, type: "movie" };
+
+  const provider = new VegaMoviesProvider({ cache: null });
+  provider.search = async () => [first, second];
+  const attempts = [];
+  provider.getDetails = async (type, id) => ({ id, type, title: "War Dogs", year: 2016, sourceUrl: `https://vegamovies.gallery${id}` });
+  provider.resolveStream = async (detail) => {
+    attempts.push(detail.id);
+    if (detail.id === first.id) {
+      throw new ProviderError("no candidates passed ffprobe validation", "unsupported");
+    }
+    return {
+      url: "https://cdn.example.net/war-dogs.mkv?sig=1",
+      headers: { Referer: "https://vegamovies.gallery/" },
+      mediaType: "mkv",
+      sourceType: "provider"
+    };
+  };
+
+  const source = await provider.resolveByTitle({ title: "War Dogs", year: 2016, type: "movie" });
+  assert.equal(source.url, "https://cdn.example.net/war-dogs.mkv?sig=1");
+  assert.deepEqual(attempts, [first.id, second.id]);
+  assert.equal(source.attempts.filter((attempt) => !attempt.ok).length, 1);
+  assert.match(source.note, /candidate 2 of 2/);
+});
+
+test("resolveByTitle reports every failed candidate when none yield media", { timeout: 30000 }, async () => {
+  const items = [
+    { id: "/one/", title: "Some Movie", year: 2020, type: "movie" },
+    { id: "/two/", title: "Some Movie", year: 2020, type: "movie" }
+  ];
+  const provider = new VegaMoviesProvider({ cache: null });
+  provider.search = async () => items;
+  provider.getDetails = async (type, id) => ({ id, type, title: "Some Movie", year: 2020, sourceUrl: `https://vegamovies.gallery${id}` });
+  provider.resolveStream = async () => {
+    throw new ProviderError("no candidates passed ffprobe validation", "unsupported");
+  };
+
+  await assert.rejects(
+    () => provider.resolveByTitle({ title: "Some Movie", year: 2020, type: "movie" }),
+    (err) => err instanceof ProviderError && /matched 2 candidate\(s\)/.test(err.message) && /ffprobe/.test(err.message)
+  );
+});
+
+test("resolveByTitle rejects unknown titles honestly (no fabricated source)", { timeout: 30000 }, async () => {
+  const provider = new VegaMoviesProvider({ cache: null });
+  provider.search = async () => [{ id: "/unrelated/", title: "Completely Different Movie", year: 1999, type: "movie" }];
+  await assert.rejects(
+    () => provider.resolveByTitle({ title: "War Dogs", year: 2016, type: "movie" }),
+    (err) => err instanceof ProviderError && err.code === "not_found"
+  );
+});
 
 test("scoreTitleMatch prefers exact, then prefix, then partial matches", () => {
   const exact = scoreTitleMatch("War Dogs", "War Dogs", 2016, 2016);
@@ -142,7 +212,7 @@ test("resolveStream throws a clear error when the chain yields no playable media
         id: "/download-movie/",
         sourceUrl: "https://vegamovies.gallery/download-movie/"
       }),
-    /no playable media URL/
+    /passed ffprobe validation/
   );
 });
 

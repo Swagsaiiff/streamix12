@@ -217,3 +217,54 @@ test("a permanent error from the explicitly requested provider aborts immediatel
   );
   assert.equal(vega.calls.length, 0);
 });
+
+test("bridges to another provider's resolveByTitle when the requested provider has no extractor", async () => {
+  const cine = mockProvider({ name: "CineStream", detail: { id: "tt1", type: "movie", title: "War Dogs", year: 2016 } });
+  const vega = mockProvider({ name: "VegaMovies", capabilities: { supportsStreamResolution: true } });
+  vega.getDetails = async () => {
+    throw new ProviderError("id does not belong to VegaMovies", "unsupported");
+  };
+  vega.resolveByTitle = async ({ title, year }) => ({
+    url: "https://cdn.example.net/war-dogs.mkv?sig=1",
+    headers: { Referer: "https://vegamovies.gallery/" },
+    mediaType: "mkv",
+    sourceType: "provider",
+    matchedTitle: title,
+    matchedYear: year,
+    matchScore: 1120,
+    attempts: [{ title, ok: false }, { title, ok: true }],
+    note: "Resolved via VegaMovies title match"
+  });
+
+  const resolver = createResolver({ providers: [cine, vega], fixturePath: "F" });
+  const stream = await resolver.resolveStream("movie", "tt1", { provider: "CineStream" });
+  assert.equal(stream.resolution.status, "provider_stream");
+  assert.equal(stream.provider.name, "VegaMovies");
+  assert.equal(stream.resolution.matchedBy, "title");
+  assert.equal(stream.resolution.requestedProvider, "CineStream");
+  assert.equal(stream.resolution.matchScore, 1120);
+  assert.equal(stream.resolution.matchesTried, 1);
+  assert.equal(stream.sourceUrl, "https://cdn.example.net/war-dogs.mkv?sig=1");
+  assert.equal(stream.headers.Referer, "https://vegamovies.gallery/");
+});
+
+test("bridge failure is reported in the final unsupported error", async () => {
+  const cine = mockProvider({ name: "CineStream", detail: { id: "tt1", type: "movie", title: "Obscure Film", year: 2016 } });
+  const vega = mockProvider({ name: "VegaMovies", capabilities: { supportsStreamResolution: true } });
+  vega.getDetails = async () => {
+    throw new ProviderError("id does not belong to VegaMovies", "unsupported");
+  };
+  vega.resolveByTitle = async () => {
+    throw new ProviderError('VegaMovies has no close match for "Obscure Film" (2016)', "not_found");
+  };
+
+  const resolver = createResolver({ providers: [cine, vega], fixturePath: null, allowFixture: false });
+  await assert.rejects(
+    () => resolver.resolveStream("movie", "tt1", { provider: "CineStream" }),
+    (err) =>
+      err instanceof ProviderError &&
+      err.code === "unsupported" &&
+      /title-based lookup failed/.test(err.message) &&
+      /no close match/.test(err.message)
+  );
+});

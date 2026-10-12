@@ -10,6 +10,33 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Three fixes: CineStream real playback, search grid, search relevance
 
+## Intermittent playback failures: root causes and fixes
+
+### Root cause of the intermittent browser stall (found and fixed)
+
+`buildMasterPlaylist` derived `CODECS` from the **source** probe, so a session that **transcoded** a non-H.264 source (e.g. HEVC) advertised `CODECS="hvc1..."` while the HLS variants were actually H.264/AAC. hls.js parsed the master, found no level it could play (HEVC unsupported in the test browser's MSE), requested no variant, and the player sat at `readyState 0` — an intermittent "some titles play, others do not" failure (remux/H.264 titles played; HEVC-source titles stalled). Fix: `buildMasterPlaylist({ ..., mode })` now advertises the **output** codecs (`avc1.4d401f,mp4a.40.2` when transcoding). Verified: `Inception` (HEVC source, `mode=transcode`) now plays in the browser — `duration=172.05s`, `readyState=4`, `error=null`, full segment chain 200.
+
+### Title-fallback and diagnostics changes
+
+- `vegamovies.js`: `rankTitleCandidates()` scores by normalized title, year and type (type bonus/penalty rather than a hard filter, dedupe by id, cap 5); `resolveByTitle()` now walks candidates **in rank order**, continuing to the next when a candidate's detail fetch, host-chain extraction, or ffprobe validation fails, and returns the first validated source (note records "candidate N of M"); all-candidates-failed raises an aggregated `unsupported` error listing each candidate and reason. Unknown titles still raise an honest `not_found`.
+- Structured logs added: `resolve.title_bridge`, `vega.title_search`, `vega.title_candidates`, `vega.extraction_candidates`, `vega.ffprobe_check`, `vega.media_validated`, `vega.resolved`, `vega.candidate_failed`, `vega.extraction_failed`, `vega.title_no_match`, `resolve.title_bridge_failed` (host-only, no signed URLs logged).
+- `extractor.js`: bridge attempts are logged; the final unsupported error now includes the title-bridge failure reason; `resolution` carries `matchedBy`, `matchScore`, `matchesTried`.
+- Provider-specific ids preserved: cinemeta `tt…` ids are still routed to CineStream, VegaMovies permalinks to VegaMovies (the bridge only runs for ids the requested provider owns, and adapters reject foreign ids with a permanent `unsupported` error rather than retrying).
+- Source headers preserved end-to-end (`Referer` from the resolver reaches ffprobe validation and is returned in the resolved source for FFmpeg).
+
+### Verification (live)
+
+- CineStream titles resolved via the title bridge (exact title + year, score 1210): The Batman (2022), Inception (2010), Oppenheimer (2023), Dune (2021 — ranked above Dune 1984), Avengers: Endgame (2019), Spy x Family Code: White (2023). Honest failures: War Dogs (2016) — no VegaMovies match; series (e.g. `tt5766194`) — episode extraction not ported.
+- Browser end-to-end: transcoded CineStream title plays (`readyState=4`, `duration=172.05s`, no media error); HLS + audio tracks unchanged.
+- `npm run test` → **81/81 pass** (added: transcode-vs-remux CODECS, ranked candidates, next-candidate-on-failure, aggregated all-failed error, honest no-match, bridge success/failure through the resolver).
+- `npm run build` → OK. `GET /api/providers/status` → `verifiedRealProviderPlayback=true`, `realPlaybackProviders=["VegaMovies"]`.
+
+### Remaining blockers
+
+- Series episode extraction for VegaMovies still not ported (music/series titles return an explicit error).
+- Titles with no close VegaMovies match (by title + year) return an explicit 422.
+- Non-H.264/AAC sources transcode (slower start; `streamMode` reports which).
+
 ### 1. CineStream titles now play real streams (title bridge)
 
 - **Blocker fixed:** CineStream is metadata-only (no extractor); its ids are IMDb ids, so its titles previously ended in `No real stream source is available`.

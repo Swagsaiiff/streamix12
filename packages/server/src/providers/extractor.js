@@ -1,4 +1,5 @@
 import { ProviderError, isRetryableError } from "./base.js";
+import { logger } from "../logger.js";
 
 const DEFAULT_RETRIES = 2;
 const RETRY_DELAY_MS = 200;
@@ -114,11 +115,21 @@ export function createResolver({
       noExtractor.push(candidate.getName());
     }
 
+    let bridgeAttempted = false;
+    let bridgeError = null;
     if (resolvedDetail?.title) {
       for (const bridge of providers) {
         if (bridge.getName() === resolvedProviderName) continue;
         if (typeof bridge.resolveByTitle !== "function") continue;
+        bridgeAttempted = true;
         try {
+          logger.info("resolve.title_bridge", {
+            requestedProvider: resolvedProviderName,
+            bridgeProvider: bridge.getName(),
+            type: validType,
+            title: resolvedDetail.title,
+            year: resolvedDetail.year ?? null
+          });
           const source = await bridge.resolveByTitle({
             title: resolvedDetail.title,
             year: resolvedDetail.year ?? null,
@@ -132,7 +143,8 @@ export function createResolver({
               sourceType: source.sourceType ?? "provider",
               requestedProvider: resolvedProviderName,
               matchedBy: "title",
-              matchScore: source.matchScore ?? null
+              matchScore: source.matchScore ?? null,
+              matchesTried: source.attempts?.filter((attempt) => !attempt.ok).length ?? 0
             },
             sourceUrl: source.url,
             headers: source.headers ?? {},
@@ -143,6 +155,13 @@ export function createResolver({
           };
         } catch (err) {
           lastError = err;
+          bridgeError = err;
+          logger.warn("resolve.title_bridge_failed", {
+            bridgeProvider: bridge.getName(),
+            title: resolvedDetail.title,
+            code: err.code ?? "error",
+            reason: String(err.message ?? "").slice(0, 200)
+          });
         }
       }
     }
@@ -167,7 +186,9 @@ export function createResolver({
 
     if (noExtractor.length > 0) {
       throw new ProviderError(
-        `No real stream source is available for this title (no supported extractor in: ${noExtractor.join(", ")}; title-based source lookup also found no playable match).`,
+        `No real stream source is available for this title (no supported extractor in: ${noExtractor.join(", ")}${
+          bridgeAttempted ? `; title-based lookup failed: ${String(bridgeError?.message ?? "no playable match").slice(0, 160)}` : ""
+        }).`,
         "unsupported"
       );
     }
