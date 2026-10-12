@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createStream, cleanupStream } from "../api.js";
 import { audioTrackLabel } from "../lib/languages.js";
-import { AUTO_QUALITY, buildQualityOptions, describeQualityAvailability } from "../lib/quality.js";
+import {
+  AUTO_QUALITY,
+  applyQuality,
+  buildQualityOptions,
+  currentQualityValue,
+  explainQuality
+} from "../lib/quality.js";
 import { progressStore, clampPosition } from "../lib/progress.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -197,11 +203,15 @@ export default function Player({ item, onClose, onProgress }) {
         const syncLevels = () => {
           const list = hls.levels ?? [];
           setLevels(list);
-          setActiveLevel(hls.autoLevelEnabled ? AUTO_QUALITY : hls.currentLevel);
+          setActiveLevel(currentQualityValue(hls));
         };
 
         hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => syncAudio(true));
         hls.on(Hls.Events.LEVEL_SWITCHED, () => syncLevels());
+        hls.on(Hls.Events.LEVEL_LOADED, () => syncLevels());
+        hls.on(Hls.Events.LEVEL_UPDATED, () => syncLevels());
+        hls.on(Hls.Events.LEVELS_UPDATED, () => syncLevels());
+        hls.on(Hls.Events.MANIFEST_LOADED, () => syncLevels());
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (cancelled) return;
@@ -402,14 +412,7 @@ export default function Player({ item, onClose, onProgress }) {
   const selectQuality = useCallback((value) => {
     const hls = hlsRef.current;
     if (!hls) return;
-    const level = Number(value);
-    if (level === AUTO_QUALITY) {
-      hls.currentLevel = -1;
-      setActiveLevel(AUTO_QUALITY);
-    } else {
-      hls.currentLevel = level;
-      setActiveLevel(level);
-    }
+    setActiveLevel(applyQuality(hls, value));
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -479,7 +482,13 @@ export default function Player({ item, onClose, onProgress }) {
   const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const bufferedPct = duration > 0 ? Math.min(100, (buffered / duration) * 100) : 0;
   const qualityInfo = buildQualityOptions(levels, activeLevel);
-  const qualityNote = describeQualityAvailability(qualityInfo.options);
+  const qualityNote = explainQuality(qualityInfo.realCount, qualityInfo.displayLabel);
+  const qualityLabel =
+    qualityInfo.single
+      ? qualityInfo.displayLabel
+      : activeLevel === AUTO_QUALITY
+        ? "Auto"
+        : (qualityInfo.real.find((level) => level.value === activeLevel)?.label ?? "Auto");
   const displayTitle =
     current.type === "series" && current.season != null && current.episode != null
       ? `${current.title} — S${current.season}E${current.episode}${current.episodeTitle ? ` · ${current.episodeTitle}` : ""}`
@@ -634,21 +643,27 @@ export default function Player({ item, onClose, onProgress }) {
                 </label>
               )}
 
-              <label className="player-select" title={qualityNote ?? ""}>
-                <span>Quality</span>
-                <select
-                  value={activeLevel}
-                  onChange={(e) => selectQuality(e.target.value)}
-                  disabled={qualityInfo.single}
-                  aria-label="Video quality"
-                >
-                  {qualityInfo.options.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {qualityInfo.single ? (
+                <span className="player-quality-static" title={qualityNote ?? "Single quality source"}>
+                  <span className="player-quality-label">Quality</span>
+                  <span className="player-quality-value">{qualityLabel}</span>
+                </span>
+              ) : (
+                <label className="player-select" title={qualityNote ?? "Choose video quality"}>
+                  <span>Quality</span>
+                  <select
+                    value={activeLevel}
+                    onChange={(e) => selectQuality(e.target.value)}
+                    aria-label="Video quality"
+                  >
+                    {qualityInfo.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.value === AUTO_QUALITY ? "Auto" : option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
 
               <label className="player-select">
                 <span>Speed</span>

@@ -18,24 +18,63 @@ export function qualityLabel(level) {
   return null;
 }
 
-export function buildQualityOptions(levels = [], currentLevel = AUTO_QUALITY) {
-  const options = [{ value: AUTO_QUALITY, label: "Auto" }];
+export function realLevels(levels = []) {
   const seen = new Set();
+  const list = [];
   levels.forEach((level, index) => {
     const label = qualityLabel(level);
-    if (!label) return;
-    if (seen.has(label)) return;
+    if (!label || seen.has(label)) return;
     seen.add(label);
-    options.push({ value: index, label });
+    list.push({ value: index, label });
   });
-  // "single" means the source exposes at most one real quality, so switching is pointless.
-  const single = options.length <= 2;
-  return { options, single, hasRealChoices: options.length > 2, current: currentLevel };
+  return list;
 }
 
-export function describeQualityAvailability(options) {
-  if (!options || options.length <= 2) {
-    return "Only one quality is available for this source";
-  }
+export function buildQualityOptions(levels = [], currentLevel = AUTO_QUALITY) {
+  const real = realLevels(levels);
+  const options = [{ value: AUTO_QUALITY, label: "Auto" }, ...real];
+  // `single` = at most one real quality, so there is nothing to switch between.
+  const single = real.length <= 1;
+  return {
+    options,
+    real,
+    realCount: real.length,
+    single,
+    current: currentLevel,
+    // With a single quality, show that actual quality rather than a meaningless "Auto".
+    displayValue: single && real.length === 1 ? real[0].value : currentLevel,
+    displayLabel: single
+      ? real.length === 1
+        ? real[0].label
+        : "Auto"
+      : currentLevel === AUTO_QUALITY
+        ? "Auto"
+        : (real.find((r) => r.value === currentLevel)?.label ?? "Auto")
+  };
+}
+
+export function explainQuality(realCount, displayLabel) {
+  if (realCount <= 0) return "This source does not report any explicit video quality levels";
+  if (realCount === 1) return `Only ${displayLabel} is available from this source, so switching is unavailable`;
   return null;
+}
+
+// Applies a selection to an hls.js instance. Returns the level that was requested
+// (AUTO_QUALITY means automatic/adaptive).
+export function applyQuality(hls, value) {
+  if (!hls) return AUTO_QUALITY;
+  const level = Number(value);
+  if (!Number.isFinite(level) || level === AUTO_QUALITY) {
+    hls.currentLevel = AUTO_QUALITY;
+    return AUTO_QUALITY;
+  }
+  hls.currentLevel = level;
+  return level;
+}
+
+export function currentQualityValue(hls) {
+  if (!hls) return AUTO_QUALITY;
+  if (hls.autoLevelEnabled) return AUTO_QUALITY;
+  const level = Number(hls.currentLevel);
+  return Number.isFinite(level) && level >= 0 ? level : AUTO_QUALITY;
 }

@@ -1701,3 +1701,48 @@ body {
     width: 160px;
   }
 }
+
+/* Quality: single-quality sources show the real label as a static chip (no disabled control). */
+.player-quality-static {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 38px;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(229, 231, 235, 0.18);
+  background: rgba(18, 20, 26, 0.72);
+  font-size: 0.78rem;
+  color: #e5e7eb;
+  cursor: default;
+}
+
+.player-quality-label {
+  color: #9aa0a8;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.player-quality-value {
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.player-quality-static::after {
+  content: "single";
+  margin-left: 0.15rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #facc15;
+  border: 1px solid rgba(250, 204, 21, 0.45);
+  border-radius: 999px;
+  padding: 0 0.3rem;
+}
+
+/* Disabled selects (if ever used) must not show a forbidden cursor. */
+.player-select select:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
