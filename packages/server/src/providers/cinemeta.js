@@ -45,8 +45,19 @@ export function normalizeMeta(meta) {
 
 export function normalizeDetail(meta) {
   const base = normalizeMeta(meta);
+  const shared = {
+    runtime: meta.runtime ?? null,
+    cast: Array.isArray(meta.cast) ? meta.cast.slice(0, 12) : null,
+    director: Array.isArray(meta.director) ? meta.director.slice(0, 4) : null,
+    writer: Array.isArray(meta.writer) ? meta.writer.slice(0, 4) : null,
+    country: meta.country ?? null,
+    language: meta.language ?? null,
+    awards: meta.awards ?? null,
+    released: meta.released ?? null,
+    status: meta.status ?? null
+  };
   if (base.type === "movie") {
-    return { ...base, episodes: null };
+    return { ...base, ...shared, episodes: null };
   }
   const episodes = (meta.videos ?? [])
     .filter((ep) => ep.season != null && ep.season !== 0)
@@ -58,10 +69,11 @@ export function normalizeDetail(meta) {
       overview: ep.overview ?? ep.description ?? null,
       thumbnail: getPosterUrl(ep.thumbnail),
       firstAired: ep.firstAired ?? ep.released ?? null,
-      rating: Number.parseFloat(ep.rating) || null
+      rating: Number.parseFloat(ep.rating) || null,
+      runtime: ep.runtime ?? null
     }))
     .sort((a, b) => a.season - b.season || a.episode - b.episode);
-  return { ...base, episodes };
+  return { ...base, ...shared, episodes };
 }
 
 export class CineStreamProvider extends BaseProvider {
@@ -127,6 +139,35 @@ export class CineStreamProvider extends BaseProvider {
       )
     );
     return this.dedupe(batches.flat());
+  }
+
+  async getCatalogByGenre(type, genre, pages = 2, startSkip = 0) {
+    const batches = await Promise.all(
+      Array.from({ length: pages }, (_, i) =>
+        this.fetchCatalog(type, startSkip + i * CATALOG_PAGE_SIZE, { genre })
+      )
+    );
+    return this.dedupe(batches.flat());
+  }
+
+  async getKitsuCatalog(catalogId, pages = 2) {
+    const batches = await Promise.all(
+      Array.from({ length: pages }, (_, i) => this.fetchKitsuCatalogPage(catalogId, i * CATALOG_PAGE_SIZE))
+    );
+    return this.dedupe(batches.flat());
+  }
+
+  async fetchKitsuCatalogPage(catalogId, skip) {
+    const url = `${KITSU}/catalog/anime/${catalogId}/skip=${skip}.json`;
+    const cacheKey = this.cache ? `kitsu:catalog:${url}` : null;
+    if (cacheKey) {
+      const cached = this.cache.get(cacheKey);
+      if (cached) return cached;
+    }
+    const data = await this.fetchJson(url);
+    const items = (data.metas ?? []).map(normalizeMeta);
+    if (cacheKey) this.cache.set(cacheKey, items, 300000);
+    return items;
   }
 
   async search(query) {

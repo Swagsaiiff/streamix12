@@ -21,6 +21,27 @@ export function candidateRank(url) {
   return 3;
 }
 
+export function episodeFromUrl(url) {
+  const match = String(url ?? "").match(/s(\d{1,2})[\s._-]*e(\d{1,3})/i);
+  if (!match) return null;
+  return { season: Number(match[1]), episode: Number(match[2]) };
+}
+
+export function pickCandidateForEpisode(candidates, { season = null, episode = null } = {}) {
+  if (season == null || episode == null) return { url: candidates[0] ?? null, matched: false, total: candidates.length };
+  const withEpisodes = candidates.map((url) => ({ url, ep: episodeFromUrl(url) }));
+  const exact = withEpisodes.find((entry) => entry.ep && entry.ep.season === Number(season) && entry.ep.episode === Number(episode));
+  if (exact) return { url: exact.url, matched: true, total: candidates.length, episode: exact.ep };
+  return { url: null, matched: false, total: candidates.length, available: withEpisodes.filter((e) => e.ep).map((e) => e.ep) };
+}
+
+// Series pages list one host link per episode in document order without a season/episode
+// tag in the page markup, so the Nth host link belongs to episode N (1-based).
+export function hostLinkIndexForEpisode(season, episode) {
+  if (season == null || episode == null) return null;
+  return Math.max(0, Number(episode) - 1);
+}
+
 export function selectMediaCandidates(urls) {
   return Array.from(new Set(urls))
     .filter((url) => !isPlaceholderMedia(url))
@@ -366,7 +387,7 @@ export class VegaMoviesProvider extends BaseProvider {
     return item;
   }
 
-  async resolveByTitle({ title, year = null, type = "movie" } = {}) {
+  async resolveByTitle({ title, year = null, type = "movie", season = null, episode = null } = {}) {
     if (!title) {
       throw new ProviderError("title is required for title-based resolution", "validation");
     }
@@ -396,7 +417,7 @@ export class VegaMoviesProvider extends BaseProvider {
     for (const [index, { item, score }] of ranked.entries()) {
       try {
         const detail = await this.getDetails(item.type, item.id);
-        const source = await this.resolveStream(detail);
+        const source = await this.resolveStream(detail, { season, episode });
         logger.info("vega.resolved", {
           query: title,
           matched: item.title,
@@ -438,7 +459,7 @@ export class VegaMoviesProvider extends BaseProvider {
     );
   }
 
-  async resolveStream(detail) {
+  async resolveStream(detail, { season = null, episode = null } = {}) {
     const base = await this.getBaseUrl();
     const pageUrl = detail?.sourceUrl && /^https?:\/\//i.test(detail.sourceUrl)
       ? detail.sourceUrl
@@ -460,6 +481,68 @@ export class VegaMoviesProvider extends BaseProvider {
       kinds: [...new Set(linkPages.map((p) => p.kind))],
       labels: linkPages.map((p) => p.label).slice(0, 6)
     });
+
+    const episodeRequested = season != null && episode != null;
+    const orderedHostLinks = [];
+    let orderedHostReferer = pageUrl;
+    for (const linkPage of linkPages) {
+      let probeHtml;
+      try {
+        probeHtml = await this.fetchText(linkPage.url, { headers: { Referer: pageUrl }, timeoutMs: 12000 });
+      } catch {
+        continue;
+      }
+      const hostLinks = extractHostLinks(probeHtml);
+      // Prefer the page that exposes a per-episode list (many host links) for series playback.
+      if (hostLinks.length > orderedHostLinks.length) {
+        orderedHostLinks.length = 0;
+        // vcloud links map 1:1 to episodes in document order; other hosts (fastdl) are
+        // alternate mirrors of the same episodes and would offset the index mapping.
+        const vcloudOnly = hostLinks.filter((href) => /vcloud\./i.test(href));
+        orderedHostLinks.push(...(vcloudOnly.length > 0 ? vcloudOnly : hostLinks));
+        orderedHostReferer = linkPage.url;
+        if (!chosenLabel) chosenLabel = linkPage.label;
+      }
+      if (!episodeRequested) break;
+    }
+
+    if (episodeRequested && orderedHostLinks.length > 0) {
+      const wantedIndex = hostLinkIndexForEpisode(season, episode);
+      const order = [];
+      if (wantedIndex != null && wantedIndex < orderedHostLinks.length) order.push(wantedIndex);
+      for (let i = 0; i < orderedHostLinks.length; i += 1) {
+        if (!order.includes(i)) order.push(i);
+      }
+      logger.info("vega.episode_link_candidates", {
+        requested: `S${season}E${episode}`,
+        hostLinks: orderedHostLinks.length,
+        wantedIndex
+      });
+
+      for (const index of order.slice(0, 6)) {
+        const hostLink = orderedHostLinks[index];
+        const media = await this.mediaFromHost(hostLink, orderedHostReferer, base);
+        if (!media) continue;
+        // If the media filename exposes an episode tag, it must match the request.
+        const tag = episodeFromUrl(media);
+        if (tag && (tag.season !== Number(season) || tag.episode !== Number(episode))) continue;
+        if (!(await this.isPlayableMedia(media, pageUrl))) continue;
+        logger.info("vega.media_validated", { host: hostOf(media), index, requested: `S${season}E${episode}` });
+        return {
+          url: media,
+          headers: { Referer: `${base}/` },
+          mediaType: media.includes(".m3u8") ? "hls" : "mkv",
+          sourceType: "provider",
+          episode: tag ?? { season: Number(season), episode: Number(episode) },
+          note: `Resolved from VegaMovies (real provider source; ${chosenLabel ? `section "${chosenLabel}", ` : ""}episode S${season}E${episode})`
+        };
+      }
+
+      throw new ProviderError(
+        `VegaMovies exposes ${orderedHostLinks.length} episode link(s) but none resolved to a valid media file for S${season}E${episode}`,
+        "unsupported"
+      );
+    }
 
     for (const linkPage of linkPages) {
       if (selectMediaCandidates(candidates).length >= 3) break;
@@ -507,13 +590,30 @@ export class VegaMoviesProvider extends BaseProvider {
     }
 
     const ranked = selectMediaCandidates(candidates);
+    const selection = pickCandidateForEpisode(ranked, { season, episode });
     logger.info("vega.extraction_candidates", {
       page: hostOf(pageUrl),
       total: ranked.length,
-      hosts: [...new Set(ranked.map((url) => hostOf(url)).filter(Boolean))]
+      hosts: [...new Set(ranked.map((url) => hostOf(url)).filter(Boolean))],
+      requestedEpisode: season != null && episode != null ? `S${season}E${episode}` : null,
+      matchedEpisode: selection.matched
     });
 
-    for (const candidate of ranked) {
+    if (season != null && episode != null && !selection.matched) {
+      logger.warn("vega.episode_not_found", {
+        requested: `S${season}E${episode}`,
+        available: (selection.available ?? []).slice(0, 8).map((ep) => `S${ep.season}E${ep.episode}`)
+      });
+      throw new ProviderError(
+        `VegaMovies links for this title do not include episode S${season}E${episode}${
+          selection.available?.length ? ` (available: ${selection.available.slice(0, 6).map((ep) => `S${ep.season}E${ep.episode}`).join(", ")})` : ""
+        }`,
+        "not_found"
+      );
+    }
+
+    const ordered = selection.url ? [selection.url, ...ranked.filter((url) => url !== selection.url)] : ranked;
+    for (const candidate of ordered) {
       const playable = await this.isPlayableMedia(candidate, pageUrl);
       logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable });
       if (playable) {
@@ -523,6 +623,7 @@ export class VegaMoviesProvider extends BaseProvider {
           headers: { Referer: `${base}/` },
           mediaType: candidate.includes(".m3u8") ? "hls" : "mkv",
           sourceType: "provider",
+          episode: episodeFromUrl(candidate),
           note: chosenLabel
             ? `Resolved from VegaMovies (real provider source; page section: "${chosenLabel}")`
             : "Resolved from VegaMovies (real provider source)"
@@ -539,6 +640,36 @@ export class VegaMoviesProvider extends BaseProvider {
       `VegaMovies detail page was fetched but none of ${ranked.length} candidate media URL(s) passed ffprobe validation`,
       "unsupported"
     );
+  }
+
+  // Resolves a single host link (vcloud/fastdl/...) down to a direct media URL.
+  async mediaFromHost(hostLink, referer, base) {
+    const direct = new Set();
+    let hostHtml;
+    try {
+      hostHtml = await this.fetchText(hostLink, { headers: { Referer: referer }, timeoutMs: 12000 });
+    } catch {
+      return null;
+    }
+    for (const mediaUrl of extractDirectMediaUrls(hostHtml)) direct.add(mediaUrl);
+
+    const vcloudToken = extractDoubleAtobValue(hostHtml);
+    if (vcloudToken && /^https?:\/\//i.test(vcloudToken)) {
+      try {
+        const tokenHtml = await this.fetchText(vcloudToken, { headers: { Referer: hostLink }, timeoutMs: 12000 });
+        for (const mediaUrl of extractDirectMediaUrls(tokenHtml)) direct.add(mediaUrl);
+        const pxl = extractPixelDrainUrl(tokenHtml);
+        if (pxl) {
+          const pxId = pxl.split("/").filter(Boolean).pop();
+          if (pxId) direct.add(`https://pixeldrain.com/api/file/${pxId}?download`);
+        }
+      } catch {
+        // token page unreachable; fall through to whatever we already collected
+      }
+    }
+
+    const ranked = selectMediaCandidates([...direct]);
+    return ranked[0] ?? null;
   }
 
   async isPlayableMedia(url, referer) {

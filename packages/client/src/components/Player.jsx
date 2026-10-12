@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createStream, cleanupStream } from "../api.js";
+import { audioTrackLabel } from "../lib/languages.js";
+import { AUTO_QUALITY, buildQualityOptions, describeQualityAvailability } from "../lib/quality.js";
+import { progressStore, clampPosition } from "../lib/progress.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const HIDE_DELAY_MS = 3000;
+const SAVE_INTERVAL_MS = 5000;
 
 function isEditableTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
@@ -20,13 +24,27 @@ function formatTime(seconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function Player({ item, onClose }) {
+function buildEpisodeQueue(item) {
+  const episodes = Array.isArray(item?.episodes) ? item.episodes : [];
+  if (item?.type !== "series" || episodes.length === 0) return [];
+  return episodes
+    .filter((ep) => ep.season != null && ep.episode != null)
+    .sort((a, b) => a.season - b.season || a.episode - b.episode);
+}
+
+export default function Player({ item, onClose, onProgress }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const hlsRef = useRef(null);
   const sessionRef = useRef(null);
   const hideTimerRef = useRef(null);
+  const saveTimerRef = useRef(0);
+  const currentRef = useRef(item);
+  const lastSavedRef = useRef(null);
+  const savedResumeRef = useRef(null);
+  const resumeAppliedRef = useRef(false);
 
+  const [current, setCurrent] = useState(item);
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState("resolving");
   const [error, setError] = useState(null);
@@ -39,13 +57,59 @@ export default function Player({ item, onClose }) {
   const [rate, setRate] = useState(1);
   const [audioTracks, setAudioTracks] = useState([]);
   const [activeTrack, setActiveTrack] = useState(null);
-  const [availableLangs, setAvailableLangs] = useState([]);
+  const [levels, setLevels] = useState([]);
+  const [activeLevel, setActiveLevel] = useState(AUTO_QUALITY);
   const [preferredLang, setPreferredLang] = useState(() => localStorage.getItem("streamix.lang") || "");
   const [fullscreen, setFullscreen] = useState(false);
   const [sourceNote, setSourceNote] = useState(null);
   const [sourceStatus, setSourceStatus] = useState(null);
   const [sourceProvider, setSourceProvider] = useState(null);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [resumedFrom, setResumedFrom] = useState(null);
+  const [ended, setEnded] = useState(false);
+  const [switching, setSwitching] = useState(false);
+
+  const queue = useMemo(() => buildEpisodeQueue(current), [current]);
+  const queueIndex = useMemo(() => {
+    if (queue.length === 0 || current.season == null || current.episode == null) return -1;
+    return queue.findIndex((ep) => ep.season === current.season && ep.episode === current.episode);
+  }, [queue, current.season, current.episode]);
+  const nextEpisode = queueIndex >= 0 ? queue[queueIndex + 1] ?? null : null;
+
+  const progressEntry = useCallback(
+    (position, dur) => ({
+      key: undefined,
+      provider: current.provider ?? "default",
+      type: current.type,
+      id: current.id,
+      title: current.title,
+      poster: current.poster ?? null,
+      backdrop: current.backdrop ?? null,
+      season: current.season ?? null,
+      episode: current.episode ?? null,
+      episodeTitle: current.episodeTitle ?? null,
+      position,
+      duration: dur
+    }),
+    [current]
+  );
+
+  const persist = useCallback(
+    (positionOverride, durationOverride) => {
+      const video = videoRef.current;
+      const dur = Number.isFinite(durationOverride) ? durationOverride : video?.duration;
+      const pos = Number.isFinite(positionOverride) ? positionOverride : video?.currentTime;
+      if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(pos)) return;
+      const entry = progressStore.save(progressEntry(pos, dur));
+      lastSavedRef.current = entry;
+      onProgress?.();
+    },
+    [progressEntry, onProgress]
+  );
+
+  useEffect(() => {
+    currentRef.current = current;
+  }, [current]);
 
   const bumpControls = useCallback(() => {
     setControlsVisible(true);
@@ -59,16 +123,21 @@ export default function Player({ item, onClose }) {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
+    const playItem = current;
 
     async function start() {
       setPhase("resolving");
       setError(null);
+      setEnded(false);
+      setResumedFrom(null);
       try {
         const [stream, hlsModule] = await Promise.all([
-          createStream(item.type, item.id, {
+          createStream(playItem.type, playItem.id, {
             signal: controller.signal,
             lang: preferredLang || undefined,
-            provider: item.provider
+            provider: playItem.provider,
+            season: playItem.season,
+            episode: playItem.episode
           }),
           import("hls.js")
         ]);
@@ -85,10 +154,27 @@ export default function Player({ item, onClose }) {
         const video = videoRef.current;
         if (!video) return;
 
+        // Resume handling: only for the same title/episode, never beyond the real duration.
+        const saved = playItem.restart ? null : progressStore.get({
+          provider: playItem.provider ?? "default",
+          type: playItem.type,
+          id: playItem.id,
+          season: playItem.season ?? null,
+          episode: playItem.episode ?? null
+        });
+        savedResumeRef.current = saved;
+        resumeAppliedRef.current = false;
+
         if (!Hls.isSupported()) {
           if (video.canPlayType("application/vnd.apple.mpegurl")) {
             video.src = stream.playlistUrl;
-            video.addEventListener("loadedmetadata", () => setPhase("ready"), { once: true });
+            video.addEventListener(
+              "loadedmetadata",
+              () => {
+                setPhase("ready");
+              },
+              { once: true }
+            );
             return;
           }
           throw new Error("HLS playback is not supported in this browser");
@@ -100,21 +186,27 @@ export default function Player({ item, onClose }) {
         hls.loadSource(stream.playlistUrl);
         hls.attachMedia(video);
 
-        const syncAudioTracks = (applyPreference = false) => {
+        const syncAudio = (applyPreference = false) => {
           const tracks = hls.audioTracks ?? [];
           setAudioTracks(tracks);
-          setAvailableLangs(Array.from(new Set(tracks.map((t) => t.lang).filter(Boolean))));
           if (applyPreference && preferredLang) {
             const match = tracks.find((t) => t.lang === preferredLang);
             if (match) hls.audioTrack = match.id;
           }
         };
+        const syncLevels = () => {
+          const list = hls.levels ?? [];
+          setLevels(list);
+          setActiveLevel(hls.autoLevelEnabled ? AUTO_QUALITY : hls.currentLevel);
+        };
 
-        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => syncAudioTracks(true));
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => syncAudio(true));
+        hls.on(Hls.Events.LEVEL_SWITCHED, () => syncLevels());
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (cancelled) return;
-          syncAudioTracks(true);
+          syncAudio(true);
+          syncLevels();
           setPhase("ready");
           video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
         });
@@ -145,6 +237,8 @@ export default function Player({ item, onClose }) {
     return () => {
       cancelled = true;
       controller.abort();
+      const video = videoRef.current;
+      if (video) persist(video.currentTime, video.duration);
       try {
         hlsRef.current?.destroy();
       } catch {
@@ -154,43 +248,90 @@ export default function Player({ item, onClose }) {
       if (sessionRef.current) cleanupStream(sessionRef.current);
       sessionRef.current = null;
     };
-  }, [item, attempt]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, attempt]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video) return undefined;
     const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPause = () => {
+      setPlaying(false);
+      persist(video.currentTime, video.duration);
+    };
     const onTime = () => {
-      setCurrentTime(video.currentTime || 0);
+      const now = video.currentTime || 0;
+      setCurrentTime(now);
       try {
         if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1));
       } catch {
         // ignore
       }
+      const stamp = Date.now();
+      if (now > 0 && stamp - saveTimerRef.current > SAVE_INTERVAL_MS) {
+        saveTimerRef.current = stamp;
+        persist(now, video.duration);
+      }
     };
     const onMeta = () => setDuration(video.duration || 0);
+    // EVENT playlists only report a real duration once segments are known, so resume is
+    // applied on the first durationchange with a usable value (never beyond the real length).
+    const applySavedResume = () => {
+      const saved = savedResumeRef.current;
+      if (!saved || resumeAppliedRef.current) return;
+      const dur = Number(video.duration);
+      if (!Number.isFinite(dur) || dur <= 0) return;
+      // EVENT playlists grow while segments load, so only resume once the reported
+      // duration can actually contain the saved position (never beyond the real length).
+      if (dur <= saved.position + 10) return;
+      resumeAppliedRef.current = true;
+      const pos = clampPosition(saved.position, dur);
+      if (pos > 5 && pos < dur - 5) {
+        video.currentTime = pos;
+        setResumedFrom(pos);
+      }
+    };
+    const onDuration = () => {
+      setDuration(video.duration || 0);
+      applySavedResume();
+    };
+    const onSeeked = () => persist(video.currentTime, video.duration);
     const onVolume = () => {
       setVolume(video.volume);
       setMuted(video.muted);
+    };
+    const onEnded = () => {
+      setEnded(true);
+      setPlaying(false);
+      const dur = video.duration;
+      if (dur > 0) {
+        progressStore.save(progressEntry(dur, dur));
+        onProgress?.();
+      }
     };
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("progress", onTime);
-    video.addEventListener("durationchange", onMeta);
+    video.addEventListener("durationchange", onDuration);
     video.addEventListener("loadedmetadata", onMeta);
+    video.addEventListener("loadeddata", applySavedResume);
+    video.addEventListener("seeked", onSeeked);
     video.addEventListener("volumechange", onVolume);
+    video.addEventListener("ended", onEnded);
     return () => {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("progress", onTime);
-      video.removeEventListener("durationchange", onMeta);
+      video.removeEventListener("durationchange", onDuration);
       video.removeEventListener("loadedmetadata", onMeta);
+      video.removeEventListener("loadeddata", applySavedResume);
+      video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("volumechange", onVolume);
+      video.removeEventListener("ended", onEnded);
     };
-  }, [phase]);
+  }, [phase, persist, progressEntry, onProgress]);
 
   useEffect(() => {
     const onFullscreen = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -258,13 +399,17 @@ export default function Player({ item, onClose }) {
     setActiveTrack(Number(id));
   }, []);
 
-  const setLanguagePreference = useCallback((lang) => {
-    setPreferredLang(lang);
-    if (lang) localStorage.setItem("streamix.lang", lang);
-    else localStorage.removeItem("streamix.lang");
+  const selectQuality = useCallback((value) => {
     const hls = hlsRef.current;
-    const match = hls?.audioTracks?.find((t) => t.lang === lang);
-    if (match) hls.audioTrack = match.id;
+    if (!hls) return;
+    const level = Number(value);
+    if (level === AUTO_QUALITY) {
+      hls.currentLevel = -1;
+      setActiveLevel(AUTO_QUALITY);
+    } else {
+      hls.currentLevel = level;
+      setActiveLevel(level);
+    }
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -280,6 +425,27 @@ export default function Player({ item, onClose }) {
     sessionRef.current = null;
     setAttempt((n) => n + 1);
   }, []);
+
+  const goToEpisode = useCallback(
+    (ep) => {
+      if (!ep) return;
+      const video = videoRef.current;
+      if (video) persist(video.currentTime, video.duration);
+      setSwitching(true);
+      setCurrent((prev) => ({
+        ...prev,
+        season: ep.season,
+        episode: ep.episode,
+        episodeTitle: ep.name ?? null,
+        poster: ep.thumbnail ?? prev.poster
+      }));
+    },
+    [persist]
+  );
+
+  useEffect(() => {
+    if (switching) setSwitching(false);
+  }, [current, switching]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -312,6 +478,12 @@ export default function Player({ item, onClose }) {
 
   const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const bufferedPct = duration > 0 ? Math.min(100, (buffered / duration) * 100) : 0;
+  const qualityInfo = buildQualityOptions(levels, activeLevel);
+  const qualityNote = describeQualityAvailability(qualityInfo.options);
+  const displayTitle =
+    current.type === "series" && current.season != null && current.episode != null
+      ? `${current.title} — S${current.season}E${current.episode}${current.episodeTitle ? ` · ${current.episodeTitle}` : ""}`
+      : current.title;
 
   return (
     <div
@@ -319,19 +491,13 @@ export default function Player({ item, onClose }) {
       ref={containerRef}
       role="dialog"
       aria-modal="true"
-      aria-label={`Playing ${item.title}`}
+      aria-label={`Playing ${displayTitle}`}
       onMouseMove={bumpControls}
       onTouchStart={bumpControls}
     >
-      <video
-        ref={videoRef}
-        className="player-video"
-        playsInline
-        onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
-      />
+      <video ref={videoRef} className="player-video" playsInline onClick={togglePlay} onDoubleClick={toggleFullscreen} />
 
-      {phase === "resolving" && (
+      {(phase === "resolving" || switching) && (
         <div className="player-center">
           <div className="player-spinner" role="status" aria-label="Loading stream" />
           <p className="player-center-text">Resolving stream and preparing HLS...</p>
@@ -361,7 +527,9 @@ export default function Player({ item, onClose }) {
             <button type="button" className="player-btn player-back" onClick={onClose} aria-label="Back to details">
               ‹ Back
             </button>
-            <span className="player-title" title={item.title}>{item.title}</span>
+            <span className="player-title" title={displayTitle}>
+              {displayTitle}
+            </span>
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
             {sourceStatus === "provider_stream" && (
               <span className="player-live-badge">{sourceProvider ? `Real source · ${sourceProvider}` : "Real source"}</span>
@@ -373,10 +541,32 @@ export default function Player({ item, onClose }) {
             )}
           </div>
 
-          {phase === "ready" && !playing && (
+          {phase === "ready" && !playing && !ended && (
             <button type="button" className="player-big-play" onClick={togglePlay} aria-label="Play">
-              <span className="player-big-play-icon" aria-hidden="true">▶</span>
+              <span className="player-big-play-icon" aria-hidden="true">
+                ▶
+              </span>
             </button>
+          )}
+
+          {phase === "ready" && (ended || resumedFrom) && (
+            <div className="player-toast" role="status">
+              {ended ? "Finished" : `Resumed from ${formatTime(resumedFrom)}`}
+            </div>
+          )}
+
+          {ended && nextEpisode && (
+            <div className="player-next-panel">
+              <p>Up next: S{nextEpisode.season}E{nextEpisode.episode} {nextEpisode.name ? `· ${nextEpisode.name}` : ""}</p>
+              <div className="player-error-actions">
+                <button type="button" className="player-btn player-btn-primary" onClick={() => goToEpisode(nextEpisode)}>
+                  Play Next
+                </button>
+                <button type="button" className="player-btn" onClick={() => setEnded(false)}>
+                  Replay
+                </button>
+              </div>
+            </div>
           )}
 
           <div className="player-bottom" onClick={(e) => e.stopPropagation()}>
@@ -427,7 +617,7 @@ export default function Player({ item, onClose }) {
 
               <div className="player-spacer" />
 
-              {audioTracks.length > 0 ? (
+              {audioTracks.length > 0 && (
                 <label className="player-select">
                   <span>Audio</span>
                   <select
@@ -437,29 +627,28 @@ export default function Player({ item, onClose }) {
                   >
                     {audioTracks.map((track) => (
                       <option key={track.id} value={track.id}>
-                        {track.name}
-                        {track.lang && !new RegExp(`\\b${track.lang}\\b`, "i").test(track.name) ? ` (${track.lang})` : ""}
+                        {audioTrackLabel(track)}
                       </option>
                     ))}
                   </select>
                 </label>
-              ) : (
-                phase === "ready" && <span className="player-note-muted">No audio tracks</span>
               )}
 
-              {availableLangs.length > 1 && (
-                <label className="player-select">
-                  <span>Lang</span>
-                  <select value={preferredLang} onChange={(e) => setLanguagePreference(e.target.value)} aria-label="Preferred audio language">
-                    <option value="">Default</option>
-                    {availableLangs.map((lang) => (
-                      <option key={lang} value={lang}>
-                        {lang}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
+              <label className="player-select" title={qualityNote ?? ""}>
+                <span>Quality</span>
+                <select
+                  value={activeLevel}
+                  onChange={(e) => selectQuality(e.target.value)}
+                  disabled={qualityInfo.single}
+                  aria-label="Video quality"
+                >
+                  {qualityInfo.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
               <label className="player-select">
                 <span>Speed</span>
@@ -472,7 +661,23 @@ export default function Player({ item, onClose }) {
                 </select>
               </label>
 
-              <button type="button" className="player-btn" onClick={toggleFullscreen} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>
+              {current.type === "series" && nextEpisode && (
+                <button
+                  type="button"
+                  className="player-btn"
+                  onClick={() => goToEpisode(nextEpisode)}
+                  aria-label={`Play next episode S${nextEpisode.season}E${nextEpisode.episode}`}
+                >
+                  Next ⏭
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="player-btn"
+                onClick={toggleFullscreen}
+                aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              >
                 {fullscreen ? "⤢ Exit" : "⤢ Full"}
               </button>
             </div>

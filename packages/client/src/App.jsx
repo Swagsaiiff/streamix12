@@ -7,6 +7,8 @@ import Grid from "./components/Grid.jsx";
 import SkeletonRow from "./components/SkeletonRow.jsx";
 import DetailModal from "./components/DetailModal.jsx";
 import Player from "./components/Player.jsx";
+import ContinueWatching from "./components/ContinueWatching.jsx";
+import { progressStore } from "./lib/progress.js";
 
 export default function App() {
   const [sections, setSections] = useState([]);
@@ -19,6 +21,7 @@ export default function App() {
   const [searchState, setSearchState] = useState("idle");
   const [modal, setModal] = useState(null);
   const [player, setPlayer] = useState(null);
+  const [continueEntries, setContinueEntries] = useState([]);
   const detailCacheRef = useRef(new Map());
   const searchControllerRef = useRef(null);
   const detailControllerRef = useRef(null);
@@ -27,22 +30,36 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchHomeSections().then((results) => {
-      if (cancelled) return;
-      const ok = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
-      const failed = results.filter((r) => r.status === "rejected").map((r) => r.reason.message);
-      setSections(ok);
-      setSectionErrors(failed);
-      const trending = ok.find((s) => s.data.key === "trending");
-      const candidate =
-        trending?.data.items.find((i) => i.backdrop) ?? trending?.data.items[0] ?? null;
-      setHeroItem(candidate ?? null);
-      setLoading(false);
-    });
+    fetchHomeSections()
+      .then((rows) => {
+        if (cancelled) return;
+        const ok = Array.isArray(rows) ? rows.filter((row) => row?.data?.items?.length) : [];
+        setSections(ok);
+        setSectionErrors([]);
+        const trending = ok.find((s) => s.data.key === "trending");
+        const candidate =
+          trending?.data.items.find((i) => i.backdrop) ?? trending?.data.items[0] ?? null;
+        setHeroItem(candidate ?? null);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSections([]);
+        setSectionErrors([err.message]);
+        setLoading(false);
+      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const refreshProgress = useCallback(() => {
+    setContinueEntries(progressStore.list());
+  }, []);
+
+  useEffect(() => {
+    refreshProgress();
+  }, [refreshProgress]);
 
   const handleSearch = useCallback(
     async (q) => {
@@ -119,11 +136,70 @@ export default function App() {
   }, [detailControllerRef]);
 
   const openPlayer = useCallback((item) => {
-    setPlayer(item);
+    setPlayer({ ...item });
   }, []);
 
   const closePlayer = useCallback(() => {
     setPlayer(null);
+    refreshProgress();
+  }, [refreshProgress]);
+
+  const resumeEntry = useCallback((entry) => {
+    setPlayer({
+      provider: entry.provider,
+      type: entry.type,
+      id: entry.id,
+      title: entry.title,
+      poster: entry.poster,
+      backdrop: entry.backdrop,
+      season: entry.season ?? null,
+      episode: entry.episode ?? null,
+      episodeTitle: entry.episodeTitle ?? null
+    });
+  }, []);
+
+  const startOverEntry = useCallback(
+    (entry) => {
+      progressStore.remove(entry);
+      refreshProgress();
+      setPlayer({
+        provider: entry.provider,
+        type: entry.type,
+        id: entry.id,
+        title: entry.title,
+        poster: entry.poster,
+        backdrop: entry.backdrop,
+        season: entry.season ?? null,
+        episode: entry.episode ?? null,
+        episodeTitle: entry.episodeTitle ?? null,
+        restart: true
+      });
+    },
+    [refreshProgress]
+  );
+
+  const dismissEntry = useCallback(
+    (entry) => {
+      progressStore.remove(entry);
+      refreshProgress();
+    },
+    [refreshProgress]
+  );
+
+  const resumeFor = useCallback((item) => {
+    const provider = item.provider ?? "default";
+    const direct = progressStore.get({
+      provider,
+      type: item.type,
+      id: item.id,
+      season: item.season ?? null,
+      episode: item.episode ?? null
+    });
+    if (direct) return direct;
+    if (item.type === "series") {
+      return progressStore.list().find((entry) => entry.type === "series" && entry.id === item.id && (entry.provider ?? "default") === provider) ?? null;
+    }
+    return null;
   }, []);
 
   const visibleItems = useMemo(() => {
@@ -200,6 +276,14 @@ export default function App() {
               {view === "home" && heroItem && (
                 <Hero item={heroItem} onMoreInfo={openDetail} onPlay={openPlayer} />
               )}
+              {view === "home" && continueEntries.length > 0 && (
+                <ContinueWatching
+                  entries={continueEntries}
+                  onResume={resumeEntry}
+                  onStartOver={startOverEntry}
+                  onDismiss={dismissEntry}
+                />
+              )}
               {view === "home" &&
                 sections.map(({ key, data }) => (
                   <Row
@@ -225,11 +309,24 @@ export default function App() {
         <DetailModal
           modal={modal}
           onClose={closeModal}
-          onPlay={openPlayer}
+          onPlay={(playedItem) => {
+            const detailResume = resumeFor({ ...modal.item, season: null, episode: null });
+            const isSeriesPlay = (modal.detail?.type ?? modal.item.type) === "series";
+            const resumeTarget = playedItem.season == null && isSeriesPlay ? detailResume : null;
+            openPlayer({
+              ...playedItem,
+              season: playedItem.season ?? resumeTarget?.season ?? null,
+              episode: playedItem.episode ?? resumeTarget?.episode ?? null,
+              episodeTitle: playedItem.episodeTitle ?? resumeTarget?.episodeTitle ?? null,
+              episodes: playedItem.episodes ?? modal.detail?.episodes ?? null,
+              runtime: modal.detail?.runtime ?? playedItem.runtime ?? null
+            });
+          }}
+          resumeInfo={resumeFor({ ...modal.item, season: null, episode: null })}
           suppressEscape={Boolean(player)}
         />
       )}
-      {player && <Player item={player} onClose={closePlayer} />}
+      {player && <Player item={player} onClose={closePlayer} onProgress={refreshProgress} />}
     </main>
   );
 }

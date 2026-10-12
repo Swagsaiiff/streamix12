@@ -1,73 +1,192 @@
 import { Router } from "express";
 import { sendError } from "../errors.js";
+import { logger } from "../logger.js";
 
 const ROW_LIMIT = 24;
-const PAGE_COUNT = 3;
-const LATEST_PAGE_COUNT = 5;
-const LATEST_PAGE_SKIP = 147;
 const CACHE_TTL_MS = 300000;
+const PROVIDER_RANKING = "CineStream top catalog";
+
+function sortByRating(items) {
+  return [...items].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+}
+
+function sortByYear(items) {
+  return [...items].filter((item) => item.year != null).sort((a, b) => b.year - a.year);
+}
+
+function sortByPopularity(items) {
+  return [...items].sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0));
+}
+
+function buildRows(provider) {
+  return [
+    {
+      key: "trending",
+      title: "Trending Movies",
+      ranking: `${PROVIDER_RANKING}, ordered by the provider's own popularity metric`,
+      fetch: () => provider.getTopMovies(3)
+    },
+    {
+      key: "popular-movies",
+      title: "Popular Movies",
+      ranking: `${PROVIDER_RANKING} (next popularity band, pages 3-6)`,
+      fetch: async () => sortByPopularity(await provider.getTopMovies(4, 147))
+    },
+    {
+      key: "new-releases",
+      title: "New Releases",
+      ranking: `${PROVIDER_RANKING}, newest-first by release year (provider exposes no dedicated latest feed)`,
+      fetch: async () => sortByYear(await provider.getTopMovies(4, 343))
+    },
+    {
+      key: "top-rated",
+      title: "Top Rated Movies",
+      ranking: `${PROVIDER_RANKING}, sorted by industry rating (IMDb) descending`,
+      fetch: async () => sortByRating(await provider.getTopMovies(4, 539))
+    },
+    {
+      key: "action",
+      title: "Action Movies",
+      ranking: `${PROVIDER_RANKING} filtered by the provider's Action genre`,
+      fetch: () => provider.getCatalogByGenre("movie", "Action", 2)
+    },
+    {
+      key: "comedy",
+      title: "Comedy Movies",
+      ranking: `${PROVIDER_RANKING} filtered by the provider's Comedy genre`,
+      fetch: () => provider.getCatalogByGenre("movie", "Comedy", 2)
+    },
+    {
+      key: "horror",
+      title: "Horror Movies",
+      ranking: `${PROVIDER_RANKING} filtered by the provider's Horror genre`,
+      fetch: () => provider.getCatalogByGenre("movie", "Horror", 2)
+    },
+    {
+      key: "popular-series",
+      title: "Popular Series",
+      ranking: `${PROVIDER_RANKING}, series catalog ordered by the provider's own popularity metric`,
+      fetch: () => provider.getTopSeries(3)
+    },
+    {
+      key: "action-series",
+      title: "Action Series",
+      ranking: `${PROVIDER_RANKING}, series catalog filtered by the provider's Action genre`,
+      fetch: () => provider.getCatalogByGenre("series", "Action", 2)
+    },
+    {
+      key: "anime-airing",
+      title: "Airing Anime",
+      ranking: "Kitsu anime catalog (kitsu-anime-airing) served by the provider",
+      fetch: () => provider.getKitsuCatalog("kitsu-anime-airing", 2)
+    },
+    {
+      key: "anime-trending",
+      title: "Trending Anime",
+      ranking: "Kitsu anime catalog (kitsu-anime-trending) served by the provider",
+      fetch: () => provider.getKitsuCatalog("kitsu-anime-trending", 2)
+    }
+  ];
+}
+
+async function loadRow(row, seen) {
+  const items = await row.fetch();
+  const unique = [];
+  for (const item of items) {
+    const dedupeKey = `${item.type}:${String(item.title ?? "").toLowerCase()}:${item.year ?? ""}`;
+    if (!item.id || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    unique.push(item);
+    if (unique.length >= ROW_LIMIT) break;
+  }
+  return {
+    key: row.key,
+    title: row.title,
+    ranking: row.ranking,
+    provider: "CineStream",
+    count: unique.length,
+    items: unique
+  };
+}
 
 export function homeRouter({ provider, enricher, cache }) {
   const router = Router();
-  const ranking = provider.getCapabilities().rankingMethod;
+  const rows = buildRows(provider);
 
-  function route(key, title, rankingNote, fetchItems) {
+  async function serveRows(requestedKeys, res, cacheKey) {
+    const cached = cache.get(cacheKey);
+    if (cached) return res.json({ ...cached, cached: true });
+
+    const selected = requestedKeys ? rows.filter((row) => requestedKeys.includes(row.key)) : rows;
+    const seen = new Set();
+    const results = await Promise.allSettled(selected.map((row) => loadRow(row, seen)));
+    const loaded = [];
+    const failures = [];
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") loaded.push(result.value);
+      else {
+        failures.push({ key: selected[index].key, message: result.reason?.message ?? "failed" });
+        logger.warn("home.row_failed", { key: selected[index].key, code: result.reason?.code ?? "error" });
+      }
+    });
+
+    if (loaded.length === 0) {
+      const stale = cache.get(cacheKey);
+      if (stale) return res.json({ ...stale, cached: true, stale: true });
+      return sendError(res, new Error("all home rows failed"));
+    }
+
+    const body = {
+      rows: loaded,
+      failures,
+      cached: false,
+      stale: false,
+      generatedAt: new Date().toISOString()
+    };
+    cache.set(cacheKey, body, CACHE_TTL_MS);
+    return res.json(body);
+  }
+
+  router.get("/", async (_req, res) => {
+    try {
+      return await serveRows(null, res, "route:home:all");
+    } catch (err) {
+      return sendError(res, err);
+    }
+  });
+
+  const singleRoutes = [
+    ["trending", "route:home:trending"],
+    ["popular-movies", "route:home:popular-movies"],
+    ["new-releases", "route:home:new-releases"],
+    ["top-rated", "route:home:top-rated"],
+    ["action", "route:home:action"],
+    ["comedy", "route:home:comedy"],
+    ["horror", "route:home:horror"],
+    ["popular-series", "route:home:popular-series"],
+    ["action-series", "route:home:action-series"],
+    ["anime-airing", "route:home:anime-airing"],
+    ["anime-trending", "route:home:anime-trending"]
+  ];
+
+  for (const [key, cacheKey] of singleRoutes) {
     router.get(`/${key}`, async (_req, res) => {
-      const cacheKey = `route:home:${key}`;
-      const cached = cache.get(cacheKey);
-      if (cached) return res.json({ ...cached, cached: true });
-
       try {
-        const items = await fetchItems();
-        const sliced = items.slice(0, ROW_LIMIT);
-        const body = {
-          key,
-          title,
-          ranking: `${ranking}${rankingNote}`,
-          enrichment: enricher.isEnabled
-            ? { status: "pending", reason: null, matched: null }
-            : { status: "disabled", reason: "no_tmdb_key", matched: 0 },
-          count: sliced.length,
-          cached: false,
-          stale: false,
-          items: sliced
-        };
-        cache.set(cacheKey, body, CACHE_TTL_MS);
-
-        if (enricher.isEnabled) {
-          enricher
-            .enrich(sliced)
-            .then(({ items: enrichedItems, matched }) => {
-              const refreshed = {
-                ...body,
-                enrichment: { status: "enabled", reason: null, matched },
-                items: enrichedItems
-              };
-              cache.set(cacheKey, refreshed, CACHE_TTL_MS);
-            })
-            .catch(() => {});
-        }
-
-        return res.json(body);
+        return await serveRows([key], res, cacheKey);
       } catch (err) {
-        const stale = cache.get(cacheKey);
-        if (stale) return res.json({ ...stale, cached: true, stale: true });
         return sendError(res, err);
       }
     });
   }
 
-  route("trending", "Top Movies", "", () => provider.getTopMovies(PAGE_COUNT));
-  route(
-    "latest",
-    "Newest Movies",
-    "; provider exposes no dedicated latest catalog: newest-first sort of the top movie catalog beyond the leading titles (skip 147+)",
-    async () => {
-      const items = await provider.getTopMovies(LATEST_PAGE_COUNT, LATEST_PAGE_SKIP);
-      return items.filter((item) => item.year != null).sort((a, b) => b.year - a.year);
+  // Backwards-compatible alias: the old "latest" row is now "New Releases".
+  router.get("/latest", async (_req, res) => {
+    try {
+      return await serveRows(["new-releases"], res, "route:home:new-releases");
+    } catch (err) {
+      return sendError(res, err);
     }
-  );
-  route("popular-series", "Top Series", "", () => provider.getTopSeries(PAGE_COUNT));
+  });
 
   return router;
 }

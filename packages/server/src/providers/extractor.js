@@ -54,7 +54,11 @@ export function createResolver({
     return [...named, ...rest];
   }
 
-  async function doResolve(type, id, { preferredLanguage = null, provider = null, allowFixture: allowFixtureOverride } = {}) {
+  async function doResolve(
+    type,
+    id,
+    { preferredLanguage = null, provider = null, allowFixture: allowFixtureOverride, season = null, episode = null } = {}
+  ) {
     const validType = validateType(type);
     if (!validType) {
       throw new ProviderError("Type must be 'movie' or 'series'", "validation");
@@ -91,7 +95,7 @@ export function createResolver({
 
       const capabilities = candidate.getCapabilities();
       if (capabilities.supportsStreamResolution === true && typeof candidate.resolveStream === "function") {
-        const source = await candidate.resolveStream(detail, { preferredLanguage });
+        const source = await candidate.resolveStream(detail, { preferredLanguage, season, episode });
         return {
           provider: { name: candidate.getName(), resolution: "provider_stream" },
           resolution: {
@@ -102,6 +106,7 @@ export function createResolver({
           sourceUrl: source.url,
           headers: source.headers ?? {},
           mediaType: source.mediaType ?? null,
+          episode: source.episode ?? null,
           title: detail.title,
           year: detail.year,
           note: source.note ?? null
@@ -133,7 +138,9 @@ export function createResolver({
           const source = await bridge.resolveByTitle({
             title: resolvedDetail.title,
             year: resolvedDetail.year ?? null,
-            type: validType
+            type: validType,
+            season,
+            episode
           });
           return {
             provider: { name: bridge.getName(), resolution: "provider_stream" },
@@ -149,6 +156,7 @@ export function createResolver({
             sourceUrl: source.url,
             headers: source.headers ?? {},
             mediaType: source.mediaType ?? null,
+            episode: source.episode ?? null,
             title: source.matchedTitle ?? resolvedDetail.title,
             year: source.matchedYear ?? resolvedDetail.year ?? null,
             note: source.note ?? null
@@ -196,7 +204,7 @@ export function createResolver({
   }
 
   function resolveStream(type, id, options) {
-    const key = `${type}:${id}:${options?.provider ?? ""}`;
+    const key = `${type}:${id}:${options?.provider ?? ""}:${options?.season ?? ""}:${options?.episode ?? ""}`;
     if (inFlight.has(key)) {
       return inFlight.get(key);
     }

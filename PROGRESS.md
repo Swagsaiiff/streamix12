@@ -14,6 +14,61 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Series playback fix + player redesign
 
+## Netflix-style UI and feature upgrade
+
+### 1. Details modal redesign (`DetailModal.jsx` + CSS)
+
+- Cinematic backdrop with gradient fade into the details panel, large poster + title, and badges for year, rating, runtime, episode count and genres.
+- Red **Play/Resume** button plus **Start over** when progress exists.
+- Real metadata grid: Type, Released, Runtime, Country, Language, Rating, Director, Writer, Cast, Awards — only fields the provider returns (Language is omitted when absent; never invented).
+- Series: season selector (only when >1 season) and clickable episode cards with thumbnails, `E<n>`, title, air date, rating and overview. Episode thumbnails lazy-load with a fallback; **clicking an episode opens that exact episode in the player** (verified S1E2 "I Love You").
+- Improved close button (rotates on hover), custom thin scrollbars, rounded corners, entrance animation, Escape + focus trap retained, responsive down to mobile.
+
+### 2. Home page expansion (server + client)
+
+- New combined `GET /api/home` returning 11 real rows with cross-row dedupe (no duplicate titles) and per-row ranking notes; existing single-row endpoints kept and a `latest` alias added for compatibility.
+- Rows (all verified live): Trending Movies, Popular Movies, New Releases, Top Rated Movies, Action Movies, Comedy Movies, Horror Movies, Popular Series, Action Series, Airing Anime, Trending Anime — sourced from the CineStream cinemeta top catalog, its genre filters, and the Kitsu anime catalogs. Categories the provider cannot back (e.g. Korean Dramas, Recently Added) are intentionally **not** shown.
+- 264 cards render across the rows; client falls back to per-row endpoints if the combined call fails.
+
+### 3. Continue Watching + resume (`lib/progress.js`, `ContinueWatching.jsx`)
+
+- Progress is stored per title **and per episode** (`provider:type:id[:sXeY]`) in `localStorage` through a storage-injected abstraction (`createProgressStore`) for future backend swap.
+- Saves every ~5s during playback and on pause/seek/unmount/ended; completion (>=95% or within 30s of the end) removes the entry; entries are deduped, capped at 60 and newest-first.
+- Continue Watching row with progress bars, remaining time, and **Resume / Start over / Remove**; resume seeks to the saved position once the real duration is known (never beyond the media length).
+- Verified: seeded progress → row + bar; Resume → `currentTime 122.3`, toast "Resumed from 2:00"; Start over → entry removed and playback from 0; invalid/expired data ignored.
+
+### 4. Carousel arrows (`Row.jsx`, `lib/carousel.js`)
+
+- Left/right arrows on every row (22 rendered), disabled at the ends, smooth scroll by ~one viewport, hover-visible on desktop and always visible on touch.
+- Pointer-drag scrolling with click suppression after a drag; native wheel/trackpad scrolling untouched (no Shift needed); row is keyboard focusable with arrow-key support.
+- Verified: right-arrow click scrolled a row from 4 to 1476.
+
+### 5. Player improvements (`Player.jsx`)
+
+- The "Lang" selector is replaced by a **Quality** selector driven by real `hls.levels` (Auto + actual resolutions); when a source exposes only one quality the selector is disabled with the note "Only one quality is available for this source" — no invented 720p/1080p entries.
+- Audio selector uses full language names (`hin` → Hindi, `eng` → English, `tha` → Thai, ISO 639-2/B and /T).
+- Series: **Play Next** (panel on finish + Next button) loads the following episode in place, keeping per-episode progress; hidden for movies and handled gracefully at the final episode.
+- Progress bar/seek, ±10s, volume, speed, fullscreen, spinner, compact error panel with Retry and autohiding controls retained.
+
+### 6. Server: episode-accurate resolution (this upgrade)
+
+- Series pages list host links **in episode order without embedded tags**, so filename-based matching could never find later episodes. Now `resolveStream` enumerates `vcloud` host links in document order and maps the Nth link to episode N (`hostLinkIndexForEpisode`), verifies the resolved media's own `SxxExx` tag when present, and tries neighbours on failure.
+- Added `S`eason/`e`pisode pass-through: `POST /api/stream/:type/:id?season=&episode=` → resolver → VegaMovies, plus `episode` in the response.
+- Verified live: S1E1, S1E2, S1E3 each resolve to the correct episode (tag-verified), remux mode.
+
+### Verification and tests
+
+- `npm run test` → **119/119 pass** (90 server + 29 client library tests: resume/persistence/completion, language names, quality options, carousel math, episode mapping).
+- `npm run build` → OK.
+- Browser (Puppeteer + Edge): 11 rows / 264 cards / 22 arrows; arrow scroll works; movie details show 8 real metadata fields; series shows 20 episode cards (thumbnails loading); episode click plays the correct episode with Quality (Auto/720p) and Audio (Hindi/English) selectors; Play Next present; Continue Watching + Resume + Start over verified; **0 page errors**.
+
+### Remaining limitations
+
+- Episode duration is not provided by the provider metadata, so it is not displayed (never invented); series runtime is shown instead.
+- Language metadata is often absent for movies, so the Language field is hidden for those titles.
+- Korean-Drama / Recently-Added style rows are not shown because the provider exposes no such catalog.
+- Quality options depend on what hls.js reports for the current source; single-quality sources show a disabled selector.
+
 ### Series failures (e.g. "Legend of the Blue Sea (2016)") — root cause and fix
 
 Inspected the live VegaMovies series page and chain:

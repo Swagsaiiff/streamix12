@@ -19,8 +19,42 @@ import {
   scoreTitleMatch,
   pickBestMatch,
   rankTitleCandidates,
+  episodeFromUrl,
+  pickCandidateForEpisode,
+  hostLinkIndexForEpisode,
   VegaMoviesProvider
 } from "./vegamovies.js";
+
+test("episodeFromUrl extracts season/episode tags from media filenames", () => {
+  assert.deepEqual(episodeFromUrl("https://x/Legend.Of.The.Blue.Sea.S01E05.480p.mkv?sig=1"), { season: 1, episode: 5 });
+  assert.deepEqual(episodeFromUrl("https://x/Show_S2E10_720p.mp4"), { season: 2, episode: 10 });
+  assert.equal(episodeFromUrl("https://x/Movie.2024.1080p.mkv"), null);
+});
+
+test("pickCandidateForEpisode prefers a filename-tagged match", () => {
+  const candidates = [
+    "https://cdn/Movie.S01E01.mkv",
+    "https://cdn/Movie.S01E02.mkv",
+    "https://cdn/Movie.S01E03.mkv"
+  ];
+  const picked = pickCandidateForEpisode(candidates, { season: 1, episode: 2 });
+  assert.equal(picked.url, "https://cdn/Movie.S01E02.mkv");
+  assert.equal(picked.matched, true);
+});
+
+test("pickCandidateForEpisode reports honestly when the tag is absent", () => {
+  const picked = pickCandidateForEpisode(["https://cdn/a.mkv", "https://cdn/b.mkv"], { season: 1, episode: 4 });
+  assert.equal(picked.url, null);
+  assert.equal(picked.matched, false);
+  assert.deepEqual(picked.available, []);
+});
+
+test("hostLinkIndexForEpisode maps the Nth host link to episode N (1-based)", () => {
+  assert.equal(hostLinkIndexForEpisode(1, 1), 0);
+  assert.equal(hostLinkIndexForEpisode(1, 5), 4);
+  assert.equal(hostLinkIndexForEpisode(2, 3), 2);
+  assert.equal(hostLinkIndexForEpisode(null, 3), null);
+});
 
 test("rankTitleCandidates ranks by score, prefers the requested type, and dedupes", () => {
   const items = [

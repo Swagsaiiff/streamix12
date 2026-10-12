@@ -29,6 +29,8 @@ export function streamRouter({
     const preferredLanguage =
       req.query.lang ?? req.query.preferredLanguage ?? defaultLanguage ?? null;
     const providerName = req.query.provider ? String(req.query.provider) : null;
+    const season = req.query.season != null && req.query.season !== "" ? Number(req.query.season) : null;
+    const episode = req.query.episode != null && req.query.episode !== "" ? Number(req.query.episode) : null;
     const allowFixture =
       req.query.fixture === "1" || req.query.fixture === "true"
         ? true
@@ -41,7 +43,9 @@ export function streamRouter({
       const stream = await resolver.resolveStream(type, id, {
         preferredLanguage,
         provider: providerName,
-        allowFixture
+        allowFixture,
+        season: Number.isFinite(season) ? season : null,
+        episode: Number.isFinite(episode) ? episode : null
       });
       logger.info("stream.source_resolved", {
         sourceType: stream.sourceType,
@@ -53,7 +57,7 @@ export function streamRouter({
         logger.warn("stream.fixture_fallback", { type, id, provider: providerName });
       }
 
-      const dedupeKey = `${stream.provider.name}:${type}:${id}:${preferredLanguage ?? ""}:${stream.sourceUrl}`;
+      const dedupeKey = `${stream.provider.name}:${type}:${id}:${season ?? ""}:${episode ?? ""}:${preferredLanguage ?? ""}:${stream.sourceUrl}`;
       let sessionPromise = inflightSessions.get(dedupeKey);
       if (!sessionPromise) {
         sessionPromise = streamManager
@@ -81,6 +85,7 @@ export function streamRouter({
         preferredLanguage: session.audioTracks.find((t) => t.default)?.language ?? null,
         title: stream.title,
         year: stream.year,
+        episode: stream.episode ?? null,
         mediaType: stream.mediaType,
         note: stream.note ?? null,
         playlistUrl: `/api/stream/${session.sessionId}/master.m3u8`

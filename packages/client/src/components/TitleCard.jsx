@@ -1,5 +1,6 @@
-export default function TitleCard({ item, onClick }) {
+export default function TitleCard({ item, onClick, progress = null }) {
   const poster = item.enriched?.poster ?? item.poster;
+  const percent = progress && progress.duration > 0 ? Math.min(100, Math.round((progress.position / progress.duration) * 100)) : 0;
   return (
     <button
       type="button"
@@ -19,6 +20,11 @@ export default function TitleCard({ item, onClick }) {
               e.currentTarget.style.display = "none";
             }}
           />
+        )}
+        {percent > 0 && (
+          <span className="card-progress" aria-hidden="true">
+            <span className="card-progress-fill" style={{ width: `${percent}%` }} />
+          </span>
         )}
         <span className="card-overlay">
           <span className="card-title-overlay">{item.title}</span>
