@@ -22,8 +22,138 @@ import {
   episodeFromUrl,
   pickCandidateForEpisode,
   hostLinkIndexForEpisode,
+  mediaCandidatesFromHtml,
+  pixelDrainApiUrl,
+  redactUrl,
+  isRetryableMediaError,
+  withRetry,
   VegaMoviesProvider
 } from "./vegamovies.js";
+
+test("pixelDrainApiUrl converts /u/ and /file/ links to the download API", () => {
+  assert.equal(pixelDrainApiUrl("https://pixeldrain.dev/u/negn6f"), "https://pixeldrain.com/api/file/negn6f?download");
+  assert.equal(pixelDrainApiUrl("https://pixeldrain.com/file/EMZUksJ6"), "https://pixeldrain.com/api/file/EMZUksJ6?download");
+  assert.equal(pixelDrainApiUrl("https://example.com/x"), null);
+  assert.equal(pixelDrainApiUrl(null), null);
+});
+
+test("mediaCandidatesFromHtml collects extensionless signed links and pixeldrain anchors", () => {
+  const html = `
+    <a href="https://pub-f4ba.r2.dev/472e1ccd?token=abc123">R2</a>
+    <a href="https://pixeldrain.dev/u/negn6f">px</a>
+    <a href="https://vcloud.beer/assets/style.css">css</a>
+    <a href="https://x.example/wp-json/thing">noise</a>
+    <script>var pxl = "https://pixeldrain.dev/u/EMZUksJ6"</script>
+    <p>https://cdn.example/Movie.720p.mkv?sig=1</p>
+  `;
+  const candidates = mediaCandidatesFromHtml(html);
+  assert.ok(candidates.some((u) => u.includes("pub-f4ba.r2.dev")));
+  assert.ok(candidates.includes("https://pixeldrain.com/api/file/negn6f?download"));
+  assert.ok(candidates.includes("https://pixeldrain.com/api/file/EMZUksJ6?download"));
+  assert.ok(candidates.some((u) => u.endsWith("Movie.720p.mkv?sig=1")));
+  assert.ok(!candidates.some((u) => u.includes("style.css")));
+  assert.ok(!candidates.some((u) => u.includes("wp-json")));
+});
+
+test("redactUrl strips tokens and signatures from logged URLs", () => {
+  const redacted = redactUrl("https://x.r2.dev/a?token=secret123&X-Amz-Signature=deadbeef&keep=1");
+  assert.ok(!redacted.includes("secret123"));
+  assert.ok(!redacted.includes("deadbeef"));
+  assert.ok(redacted.includes("keep=1"));
+});
+
+test("isRetryableMediaError distinguishes temporary failures from invalid media", () => {
+  assert.equal(isRetryableMediaError(new Error("request timed out after 15000ms")), true);
+  assert.equal(isRetryableMediaError(new Error("ECONNRESET")), true);
+  assert.equal(isRetryableMediaError(new Error("502 Bad Gateway")), true);
+  assert.equal(isRetryableMediaError(new Error("ffprobe rejected: 404 Not Found")), false);
+  assert.equal(isRetryableMediaError(new Error("invalid data found when processing input")), false);
+  assert.equal(isRetryableMediaError(new Error("unsupported codec")), false);
+});
+
+test("withRetry retries only retryable failures and exhausts gracefully", async () => {
+  let attempts = 0;
+  const retried = await withRetry(
+    async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("ETIMEDOUT");
+      return "ok";
+    },
+    { retries: 3, delayMs: 1 }
+  );
+  assert.equal(retried, "ok");
+  assert.equal(attempts, 3);
+
+  let permanentAttempts = 0;
+  await assert.rejects(
+    () =>
+      withRetry(
+        async () => {
+          permanentAttempts += 1;
+          throw new Error("ffprobe rejected: 404 Not Found");
+        },
+        { retries: 3, delayMs: 1 }
+      ),
+    /404/
+  );
+  assert.equal(permanentAttempts, 1);
+
+  let exhausted = 0;
+  await assert.rejects(
+    () =>
+      withRetry(
+        async () => {
+          exhausted += 1;
+          throw new Error("ETIMEDOUT");
+        },
+        { retries: 2, delayMs: 1 }
+      ),
+    /ETIMEDOUT/
+  );
+  assert.equal(exhausted, 3);
+});
+
+test("resolveStream retries a temporary host failure but never switches the requested episode", { timeout: 60000 }, async () => {
+  const mediaUrl = "https://pub-x.r2.dev/hash/tv.mkv?token=1";
+  const tokenInner = "https://vcloud.beer/tok?token=2";
+  const encoded = Buffer.from(Buffer.from(tokenInner, "utf8").toString("base64"), "utf8").toString("base64");
+  const seriesHtml = `
+    <main>
+      <h3>Show [Season 1] Episode Links 480p</h3>
+      <p><a href="https://nexdrive.beer/tier-480/">&#9889; Episode Links</a></p>
+    </main>`;
+  const tierHtml = `
+    <a href="https://vcloud.beer/ep1">V-Cloud</a>
+    <a href="https://vcloud.beer/ep2">V-Cloud</a>`;
+  const vcHtml = `<script>var url = atob(atob('${encoded}'))</script>`;
+  const tokenHtml = `<a href="${mediaUrl}">download</a>`;
+
+  const provider = new VegaMoviesProvider({ cache: null });
+  provider.getBaseUrl = async () => "https://vegamovies.gallery";
+  provider.fetchText = async (url) => {
+    if (url.endsWith("/show-season-1/")) return seriesHtml;
+    if (url === "https://nexdrive.beer/tier-480/") return tierHtml;
+    if (url === "https://vcloud.beer/ep1") return vcHtml;
+    if (url === "https://vcloud.beer/ep2") return vcHtml;
+    if (url === tokenInner) return tokenHtml;
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  let probes = 0;
+  provider.isPlayableMedia = async (url) => {
+    probes += 1;
+    if (url === mediaUrl && probes === 1) throw new Error("ETIMEDOUT");
+    return url === mediaUrl;
+  };
+
+  const source = await provider.resolveStream(
+    { id: "/show-season-1/", type: "series", sourceUrl: "https://vegamovies.gallery/show-season-1/" },
+    { season: 1, episode: 1 }
+  );
+  assert.equal(source.url, mediaUrl);
+  assert.deepEqual(source.episode, { season: 1, episode: 1 });
+  assert.ok(probes >= 2);
+});
+
 
 test("episodeFromUrl extracts season/episode tags from media filenames", () => {
   assert.deepEqual(episodeFromUrl("https://x/Legend.Of.The.Blue.Sea.S01E05.480p.mkv?sig=1"), { season: 1, episode: 5 });

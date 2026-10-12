@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStreamManager, initHlsDir, buildAudioLayout, pickStreamMode } from "./stream.js";
 
@@ -196,6 +197,24 @@ test("expired sessions are reaped and cleaned up", { timeout: 60000 }, async () 
   await manager.cleanupExpiredSessions();
   assert.equal(await manager.getSession(session.sessionId), null);
   assert.equal(await manager.getActiveSessionCount(), 0);
+});
+
+test("boot-time init purges orphaned session workspaces and a session dir is removed on cleanup", { timeout: 60000 }, async () => {
+  ensureFixture();
+  await initHlsDir();
+  const manager = createStreamManager({ maxConcurrent: 1 });
+  const session = await manager.createSession(fixturePath);
+  assert.ok(existsSync(session.hlsDir));
+
+  // Simulate a fresh server boot: orphaned dirs (not tracked in memory) are removed.
+  const orphan = resolve(repoRoot, "temp", "hls", "orphan-session-dir");
+  await mkdir(orphan, { recursive: true });
+  await writeFile(join(orphan, "chunk.ts"), "x");
+  await initHlsDir();
+  assert.equal(existsSync(orphan), false);
+
+  await manager.cleanupSession(session.sessionId);
+  assert.equal(existsSync(session.hlsDir), false);
 });
 
 function activeSessionCount(manager) {

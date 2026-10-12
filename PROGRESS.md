@@ -16,6 +16,82 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Netflix-style UI and feature upgrade
 
+## Intermittent series playback failures: root cause and fix
+
+### Reproduced failing case
+
+`POST /api/stream/series/tt31158589?provider=CineStream&season=1&episode=1` ("Don't Come Home", 2024) →
+`422 … VegaMovies exposes 13 episode link(s) but none resolved to a valid media file for S1E1`.
+
+### Root causes confirmed by tracing each stage
+
+1. **Wrong link tier chosen.** A VegaMovies series page lists several per-quality link pages:
+   `⚡ G-Direct [Instant]` (fastdl/filebee mirrors), `⚡ V-Cloud [Resumable]` (resolvable vcloud links),
+   `⚡ Batch/Zip` (archives). The resolver picked the **first page that merely had enough links**
+   (a G-Direct page with 22 fastdl/filebee anchors) and never used the vcloud page — and fastdl pages
+   return an HTML page with **no media and no iframe**, so every candidate failed ffprobe.
+2. **Extension-less media URLs were invisible.** The resolvable vcloud token page exposes media as
+   plain anchors: `https://pub-….r2.dev/<hash>?token=…` (no file extension) and
+   `https://pixeldrain.dev/u/<id>`. The extractor only matched `.mkv/.mp4/.m3u8` patterns, so it
+   collected **zero** candidates for these titles. Verified with ffprobe: the pixeldrain
+   `/u/<id>` → `api/file/<id>?download` conversion returns real media (h264, 360p).
+3. **No distinction between temporary and permanent failures** (a slow host/page was treated the
+   same as an invalid URL), and logs carried full signed URLs.
+
+### Fixes (`packages/server/src/providers/vegamovies.js`, `stream.js`, `routes/search.js`)
+
+- Link tiers are now inspected together (`vega.link_page_tiers`): episode resolution **prefers a
+  vcloud tier that covers the requested episode**, falls back to other usable hosts, then to the
+  largest list; it also queues the same episode index from other vcloud tiers as cross-tier fallbacks.
+- `mediaCandidatesFromHtml()` collects extension-matched URLs **plus** non-static anchors on
+  token pages, converts `pixeldrain.dev/u|file/<id>` and the `pxl` variable to the pixeldrain
+  download API, and keeps genuine signed links (R2/hubcloud) — validated by ffprobe, never assumed.
+- `withRetry()` retries **only retryable** failures (timeout/network/5xx) with backoff (max 2 extra
+  attempts); permanent errors (404/invalid data/unsupported codec) are not retried. Retries re-probe
+  the **same** candidate and never switch episodes.
+- Structured, redacted logging: `redactUrl()` strips `token`/`X-Amz-Signature`/`sig`/`expires` etc.
+  (`vega.episode_tier_selected`, `vega.episode_link_unresolved`, `vega.episode_tag_mismatch`,
+  `vega.media_retry`, `vega.host_media_candidates`, `vega.link_page_failed`).
+- Webpages can never be treated as video: candidates are only accepted after ffprobe reports a real
+  video stream; HTML responses fail validation and are skipped.
+- Search route timeout raised to 20 s (above the provider's 15 s per-request timeout) so a slow
+  provider returns partial results instead of being dropped during spikes.
+- **Temp/disk leak fixed:** `initHlsDir()` now purges orphaned session workspaces at server boot and
+  the reaper window was reduced (30 min max age, 2 min sweep). A live check found **57 stale session
+  dirs / ~14 GB**; they are now removed automatically (verified: temp went to 0).
+
+### Verification (live, real providers)
+
+| Case | Result |
+| --- | --- |
+| Series "Don't Come Home" S1E1 (previously failing) | ✅ `provider_stream`, episode S1E1, remux |
+| Series "Don't Come Home" S1E2 / S1E3 | ✅ correct episode (tag/position verified), remux, 3 audio tracks |
+| Series "From" S1E1 / S1E5 (previously failing) | ✅ correct episode, remux, 2 audio tracks |
+| Series "Vincenzo" S1E1 | ✅ correct episode, remux |
+| Movie "Dune" (2021) — consistently working | ✅ remux, 2 audio tracks |
+| Movie "Avengers: Endgame", "Demon Slayer: Infinity Castle" (intermittently failing before) | ✅ resolved, R2 media validated |
+| HLS master + first segment for a series episode | ✅ `200`, `application/vnd.apple.mpegurl`, `video/mp2t` (182 KB) |
+
+- `npm run test` → **130/130 pass** (97 server + 33 client). New tests: pixeldrain conversion,
+  extension-less anchor collection, URL redaction, retryable-vs-permanent classification,
+  `withRetry` exhaustion, series retry without episode switching, boot-time workspace purge.
+- `npm run build` → OK.
+
+### Multi-quality status (honest)
+
+Each VegaMovies episode/movie resolves to **one** provider rendition, so the player shows that single
+real quality (static chip + explanation). The quality selector's multi-level path is verified with a
+genuine 2-variant HLS (Auto/360p/720p, manual switching, back to Auto) — options are never invented.
+Generating multi-quality variants from the provider's multiple quality tiers would require a
+multi-input FFmpeg pipeline; it is documented here and not faked.
+
+### Remaining blockers
+
+- `fastdl.beer` / `filebee.xyz` G-Direct tiers are not portable (embed pages without direct media or
+  iframes), so when a title has **only** G-Direct tiers and no vcloud tier, playback returns an
+  explicit error rather than a fabricated source.
+- Batch/Zip links are archives and are intentionally not used as video.
+
 ### 1. Details modal redesign (`DetailModal.jsx` + CSS)
 
 - Cinematic backdrop with gradient fade into the details panel, large poster + title, and badges for year, rating, runtime, episode count and genres.

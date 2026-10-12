@@ -7,6 +7,7 @@ const CINEMETA = "https://v3-cinemeta.strem.io";
 const HOST_PATTERN = /(nexdrive\.|vcloud\.|hubcloud\.|fastdl\.|filebee\.|vegadrive\.|pixeldrain\.|gofile\.|gdflix\.|hubdrive\.|driveseed\.|driveleech\.|drivebot\.)/i;
 const NOISE_LINK_PATTERN = /(xmlrpc\.php|wp-json|wp-content|wp-includes|wp-admin|\/feed\/?|comments\/feed|\/comments\/?|\/tag\/|\/category\/|\/page\/\d|\/author\/|\.(css|js|png|jpe?g|svg|ico|webp|gif)(\?|$)|\/wp-login)/i;
 const MEDIA_URL_PATTERN = /https?:\/\/[^\s"'<>\\]+?\.(?:mkv|mp4|m3u8|webm)(?:\?[^\s"'<>\\]*)?/gi;
+const DIRECT_HOST_PATTERN = /(r2\.dev\/|cloudflarestorage\.com\/|pixeldrain\.|hubcloud\.|gpdl\d*\.)/i;
 const SERIES_HINT = /web-?series|season\s*\d|series/i;
 const PLACEHOLDER_PATTERN = /(unpkg\.com|site\.webm|placeholder|sample\.(?:mp4|webm|mkv))/i;
 
@@ -127,6 +128,66 @@ export function extractDirectMediaUrls(html) {
     urls.add(match[0]);
   }
   return Array.from(urls);
+}
+
+export function pixelDrainApiUrl(url) {
+  const match = String(url ?? "").match(/pixeldrain\.(?:dev|com)\/(?:u|file|api\/file)\/([\w-]+)/i);
+  if (!match) return null;
+  return `https://pixeldrain.com/api/file/${match[1]}?download`;
+}
+
+// Token pages often expose media as plain anchors without a file extension
+// (e.g. signed R2 bucket links) or as pixeldrain/hubcloud links, so collect every
+// non-static anchor in addition to the extension-matched URLs.
+export function mediaCandidatesFromHtml(html) {
+  const out = new Set();
+  for (const url of extractDirectMediaUrls(html)) out.add(url);
+
+  for (const match of html.matchAll(/href="([^"]+)"/gi)) {
+    const href = match[1].replace(/&amp;/g, "&");
+    if (NOISE_LINK_PATTERN.test(href)) continue;
+    const pixeldrain = pixelDrainApiUrl(href);
+    if (pixeldrain) {
+      out.add(pixeldrain);
+      continue;
+    }
+    if (DIRECT_HOST_PATTERN.test(href) && !/\.(css|js|png|jpe?g|svg|ico|woff2?)(\?|$)/i.test(href)) {
+      out.add(href);
+    }
+  }
+
+  const pxl = extractPixelDrainUrl(html);
+  const pxlApi = pixelDrainApiUrl(pxl ?? "");
+  if (pxlApi) out.add(pxlApi);
+
+  return Array.from(out);
+}
+
+export function redactUrl(url) {
+  return String(url ?? "").replace(
+    /([?&](?:token|access_token|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|signature|sig|expires|expire|key|hash)=)[^&]*/gi,
+    "$1<redacted>"
+  );
+}
+
+export function isRetryableMediaError(error) {
+  const message = String(error?.message ?? error ?? "");
+  if (/invalid data found|no such file|404|not found|410|gone|unsupported|codec/i.test(message)) return false;
+  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket|network|5\d\d|gateway|temporar|503|502|500/i.test(message);
+}
+
+export async function withRetry(fn, { retries = 2, delayMs = 400, isRetryable = isRetryableMediaError, onRetry } = {}) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await fn(attempt);
+    } catch (error) {
+      if (attempt >= retries || !isRetryable(error)) throw error;
+      attempt += 1;
+      onRetry?.(error, attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+    }
+  }
 }
 
 export function extractPixelDrainUrl(html) {
@@ -483,31 +544,68 @@ export class VegaMoviesProvider extends BaseProvider {
     });
 
     const episodeRequested = season != null && episode != null;
-    const orderedHostLinks = [];
-    let orderedHostReferer = pageUrl;
+    const wantedIndex = episodeRequested ? hostLinkIndexForEpisode(season, episode) : null;
+    // Inspect every link page: each is a per-quality tier that repeats the same episode range,
+    // and the resolvable episode links (vcloud) can live on a different page than the
+    // unresolvable mirrors (fastdl/filebee), so gather them all before choosing.
+    const pageInfos = [];
     for (const linkPage of linkPages) {
       let probeHtml;
       try {
         probeHtml = await this.fetchText(linkPage.url, { headers: { Referer: pageUrl }, timeoutMs: 12000 });
       } catch {
+        logger.warn("vega.link_page_failed", { host: hostOf(linkPage.url), label: linkPage.label });
         continue;
       }
       const hostLinks = extractHostLinks(probeHtml);
-      // Prefer the page that exposes a per-episode list (many host links) for series playback.
-      if (hostLinks.length > orderedHostLinks.length) {
-        orderedHostLinks.length = 0;
-        // vcloud links map 1:1 to episodes in document order; other hosts (fastdl) are
-        // alternate mirrors of the same episodes and would offset the index mapping.
-        const vcloudOnly = hostLinks.filter((href) => /vcloud\./i.test(href));
-        orderedHostLinks.push(...(vcloudOnly.length > 0 ? vcloudOnly : hostLinks));
-        orderedHostReferer = linkPage.url;
-        if (!chosenLabel) chosenLabel = linkPage.label;
+      pageInfos.push({
+        url: linkPage.url,
+        label: linkPage.label,
+        hostLinks,
+        vcloud: hostLinks.filter((href) => /vcloud\./i.test(href)),
+        usable: hostLinks.filter((href) => !/fastdl\.|filebee\./i.test(href))
+      });
+    }
+    logger.info("vega.link_page_tiers", {
+      page: hostOf(pageUrl),
+      tiers: pageInfos.map((p) => `${p.label} hosts=${p.hostLinks.length} vcloud=${p.vcloud.length}`)
+    });
+
+    let orderedHostLinks = [];
+    let orderedHostReferer = pageUrl;
+    if (!episodeRequested) {
+      const first = pageInfos[0];
+      if (first) {
+        orderedHostLinks = first.vcloud.length > 0 ? first.vcloud : first.hostLinks;
+        orderedHostReferer = first.url;
+        chosenLabel = first.label;
       }
-      if (!episodeRequested) break;
+    } else {
+      // Prefer a page whose resolvable (vcloud) list covers the requested episode.
+      const vcloudCovering = pageInfos.find((p) => p.vcloud.length > wantedIndex);
+      const usableCovering = pageInfos.find((p) => p.usable.length > wantedIndex);
+      const largest = [...pageInfos].sort((a, b) => b.hostLinks.length - a.hostLinks.length)[0] ?? null;
+      const chosen = vcloudCovering ?? usableCovering ?? largest;
+      if (chosen) {
+        orderedHostLinks = chosen.vcloud.length > 0 ? chosen.vcloud : chosen.hostLinks;
+        orderedHostReferer = chosen.url;
+        chosenLabel = chosen.label;
+        // Cross-tier fallbacks: the same episode index on the other vcloud pages.
+        for (const info of pageInfos) {
+          if (info === chosen || info.vcloud.length <= wantedIndex) continue;
+          const alternate = info.vcloud[wantedIndex];
+          if (alternate && !orderedHostLinks.includes(alternate)) orderedHostLinks.push(alternate);
+        }
+        logger.info("vega.episode_tier_selected", {
+          requested: `S${season}E${episode}`,
+          tier: chosen.label,
+          covered: chosen.vcloud.length > wantedIndex,
+          links: orderedHostLinks.length
+        });
+      }
     }
 
     if (episodeRequested && orderedHostLinks.length > 0) {
-      const wantedIndex = hostLinkIndexForEpisode(season, episode);
       const order = [];
       if (wantedIndex != null && wantedIndex < orderedHostLinks.length) order.push(wantedIndex);
       for (let i = 0; i < orderedHostLinks.length; i += 1) {
@@ -516,18 +614,38 @@ export class VegaMoviesProvider extends BaseProvider {
       logger.info("vega.episode_link_candidates", {
         requested: `S${season}E${episode}`,
         hostLinks: orderedHostLinks.length,
-        wantedIndex
+        wantedIndex,
+        target: redactUrl(orderedHostLinks[wantedIndex] ?? null)
       });
 
       for (const index of order.slice(0, 6)) {
         const hostLink = orderedHostLinks[index];
         const media = await this.mediaFromHost(hostLink, orderedHostReferer, base);
-        if (!media) continue;
+        if (!media) {
+          logger.warn("vega.episode_link_unresolved", {
+            requested: `S${season}E${episode}`,
+            index,
+            host: hostOf(hostLink)
+          });
+          continue;
+        }
         // If the media filename exposes an episode tag, it must match the request.
         const tag = episodeFromUrl(media);
-        if (tag && (tag.season !== Number(season) || tag.episode !== Number(episode))) continue;
-        if (!(await this.isPlayableMedia(media, pageUrl))) continue;
-        logger.info("vega.media_validated", { host: hostOf(media), index, requested: `S${season}E${episode}` });
+        if (tag && (tag.season !== Number(season) || tag.episode !== Number(episode))) {
+          logger.warn("vega.episode_tag_mismatch", {
+            requested: `S${season}E${episode}`,
+            found: `S${tag.season}E${tag.episode}`,
+            index
+          });
+          continue;
+        }
+        logger.info("vega.media_validated", {
+          host: hostOf(media),
+          index,
+          requested: `S${season}E${episode}`,
+          tag: tag ? `S${tag.season}E${tag.episode}` : "untagged",
+          url: redactUrl(media)
+        });
         return {
           url: media,
           headers: { Referer: `${base}/` },
@@ -539,7 +657,7 @@ export class VegaMoviesProvider extends BaseProvider {
       }
 
       throw new ProviderError(
-        `VegaMovies exposes ${orderedHostLinks.length} episode link(s) but none resolved to a valid media file for S${season}E${episode}`,
+        `VegaMovies exposes ${orderedHostLinks.length} episode link(s) for this tier but none resolved to a valid media file for S${season}E${episode}`,
         "unsupported"
       );
     }
@@ -614,8 +732,20 @@ export class VegaMoviesProvider extends BaseProvider {
 
     const ordered = selection.url ? [selection.url, ...ranked.filter((url) => url !== selection.url)] : ranked;
     for (const candidate of ordered) {
-      const playable = await this.isPlayableMedia(candidate, pageUrl);
-      logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable });
+      const playable = await withRetry(
+        async () => {
+          const ok = await this.isPlayableMedia(candidate, pageUrl);
+          if (!ok) throw new Error("ffprobe rejected the candidate media URL (404/invalid data/unsupported)");
+          return true;
+        },
+        {
+          retries: 1,
+          delayMs: 400,
+          onRetry: (error, attempt) =>
+            logger.warn("vega.media_retry", { host: hostOf(candidate), attempt, reason: String(error.message).slice(0, 80) })
+        }
+      ).catch(() => false);
+      logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable, url: redactUrl(candidate) });
       if (playable) {
         logger.info("vega.media_validated", { host: hostOf(candidate), mediaType: candidate.includes(".m3u8") ? "hls" : "mkv" });
         return {
@@ -644,32 +774,61 @@ export class VegaMoviesProvider extends BaseProvider {
 
   // Resolves a single host link (vcloud/fastdl/...) down to a direct media URL.
   async mediaFromHost(hostLink, referer, base) {
-    const direct = new Set();
+    const collections = await this.mediaCandidatesForHost(hostLink, referer);
+    for (const candidate of collections) {
+      const playable = await withRetry(
+        async () => {
+          const ok = await this.isPlayableMedia(candidate, referer);
+          if (!ok) throw new Error("ffprobe rejected the candidate media URL (404/invalid data/unsupported)");
+          return true;
+        },
+        {
+          retries: 1,
+          delayMs: 400,
+          onRetry: (error, attempt) =>
+            logger.warn("vega.media_retry", {
+              host: hostOf(candidate),
+              attempt,
+              reason: String(error.message).slice(0, 80)
+            })
+        }
+      ).catch(() => false);
+      if (playable) return candidate;
+    }
+    return null;
+  }
+
+  // Returns the ordered media candidates reachable from one host link page.
+  async mediaCandidatesForHost(hostLink, referer) {
     let hostHtml;
     try {
       hostHtml = await this.fetchText(hostLink, { headers: { Referer: referer }, timeoutMs: 12000 });
     } catch {
-      return null;
+      logger.warn("vega.host_page_failed", { host: hostOf(hostLink) });
+      return [];
     }
-    for (const mediaUrl of extractDirectMediaUrls(hostHtml)) direct.add(mediaUrl);
+
+    const direct = new Set(mediaCandidatesFromHtml(hostHtml));
 
     const vcloudToken = extractDoubleAtobValue(hostHtml);
     if (vcloudToken && /^https?:\/\//i.test(vcloudToken)) {
       try {
         const tokenHtml = await this.fetchText(vcloudToken, { headers: { Referer: hostLink }, timeoutMs: 12000 });
-        for (const mediaUrl of extractDirectMediaUrls(tokenHtml)) direct.add(mediaUrl);
-        const pxl = extractPixelDrainUrl(tokenHtml);
-        if (pxl) {
-          const pxId = pxl.split("/").filter(Boolean).pop();
-          if (pxId) direct.add(`https://pixeldrain.com/api/file/${pxId}?download`);
-        }
+        for (const url of mediaCandidatesFromHtml(tokenHtml)) direct.add(url);
       } catch {
-        // token page unreachable; fall through to whatever we already collected
+        logger.warn("vega.token_page_failed", { host: hostOf(hostLink) });
       }
     }
 
     const ranked = selectMediaCandidates([...direct]);
-    return ranked[0] ?? null;
+    if (ranked.length > 0) {
+      logger.info("vega.host_media_candidates", {
+        host: hostOf(hostLink),
+        count: ranked.length,
+        hosts: [...new Set(ranked.map((url) => hostOf(url)).filter(Boolean))]
+      });
+    }
+    return ranked;
   }
 
   async isPlayableMedia(url, referer) {

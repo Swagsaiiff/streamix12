@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir, rm, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm, access, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,13 @@ let activeTranscodes = 0;
 export async function initHlsDir() {
   try {
     await mkdir(TEMP_DIR, { recursive: true });
+    // Sessions from a previous run cannot be referenced by any client, so purge them on boot.
+    const entries = await readdir(TEMP_DIR, { withFileTypes: true });
+    await Promise.allSettled(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => rm(join(TEMP_DIR, entry.name), { recursive: true, force: true }))
+    );
   } catch {
     // Already exists
   }
@@ -172,8 +179,8 @@ export function createStreamManager({
   ffmpegPath = "ffmpeg",
   ffprobePath = "ffprobe",
   maxConcurrent = 2,
-  sessionMaxAgeMs = 3600000,
-  reaperIntervalMs = 300000,
+  sessionMaxAgeMs = 1800000,
+  reaperIntervalMs = 120000,
   playlistReadyTimeoutMs = PLAYLIST_READY_TIMEOUT_MS
 } = {}) {
   let reaper = null;

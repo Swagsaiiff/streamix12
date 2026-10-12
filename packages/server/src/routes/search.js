@@ -4,7 +4,9 @@ import { logger } from "../logger.js";
 import { listSearchProviders } from "../providers/index.js";
 
 const CACHE_TTL_MS = 600000;
-const PROVIDER_TIMEOUT_MS = 12000;
+// Must exceed the provider's own per-request timeout (15s) so a slow provider returns
+// partial results instead of being dropped wholesale during traffic spikes.
+const PROVIDER_TIMEOUT_MS = 20000;
 
 function validateQuery(value) {
   if (value == null) return { error: "Missing required query parameter 'q'." };
