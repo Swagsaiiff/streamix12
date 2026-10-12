@@ -16,11 +16,48 @@ function validateQuery(value) {
 }
 
 function dedupeKey(item) {
-  const title = String(item.title ?? "")
+  const title = normalizeTitle(item.title);
+  return `${item.type}:${title}:${item.year ?? ""}`;
+}
+
+export function normalizeTitle(value) {
+  return String(value ?? "")
     .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-  return `${item.type}:${title}:${item.year ?? ""}`;
+}
+
+export function relevanceScore(query, item) {
+  const q = normalizeTitle(query);
+  const t = normalizeTitle(item.title);
+  if (!q || !t) return 0;
+
+  if (t === q) return 1000;
+  if (t.startsWith(`${q} `)) return 800 - Math.min(80, t.length - q.length);
+  if (t.startsWith(q)) return 750;
+  if (new RegExp(`(?:^| )${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: |$)`).test(t)) return 600;
+  if (q.split(" ").every((token) => t.split(" ").includes(token))) return 450;
+  if (t.includes(q)) return 350;
+
+  const qTokens = q.split(" ").filter(Boolean);
+  const tTokens = new Set(t.split(" ").filter(Boolean));
+  const overlap = qTokens.filter((token) => tTokens.has(token)).length;
+  return qTokens.length > 0 ? Math.round((overlap / qTokens.length) * 200) : 0;
+}
+
+export function rankSearchResults(items, query) {
+  return items
+    .map((item, index) => ({ item, index, score: relevanceScore(query, item) }))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const yearA = Number(a.item.year) || 0;
+      const yearB = Number(b.item.year) || 0;
+      if (yearB !== yearA) return yearB - yearA;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.item);
 }
 
 export function mergeSearchResults(resultSets) {
@@ -94,7 +131,7 @@ export function searchRouter({ provider, enricher, cache }) {
       logger.warn("search.no_results", { query: q, allFailed, diagnostics });
     }
 
-    const items = mergeSearchResults(settled);
+    const items = rankSearchResults(mergeSearchResults(settled), q);
     const body = {
       query: q,
       count: items.length,

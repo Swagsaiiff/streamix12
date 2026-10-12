@@ -114,6 +114,39 @@ export function createResolver({
       noExtractor.push(candidate.getName());
     }
 
+    if (resolvedDetail?.title) {
+      for (const bridge of providers) {
+        if (bridge.getName() === resolvedProviderName) continue;
+        if (typeof bridge.resolveByTitle !== "function") continue;
+        try {
+          const source = await bridge.resolveByTitle({
+            title: resolvedDetail.title,
+            year: resolvedDetail.year ?? null,
+            type: validType
+          });
+          return {
+            provider: { name: bridge.getName(), resolution: "provider_stream" },
+            resolution: {
+              status: "provider_stream",
+              attemptedProviders,
+              sourceType: source.sourceType ?? "provider",
+              requestedProvider: resolvedProviderName,
+              matchedBy: "title",
+              matchScore: source.matchScore ?? null
+            },
+            sourceUrl: source.url,
+            headers: source.headers ?? {},
+            mediaType: source.mediaType ?? null,
+            title: source.matchedTitle ?? resolvedDetail.title,
+            year: source.matchedYear ?? resolvedDetail.year ?? null,
+            note: source.note ?? null
+          };
+        } catch (err) {
+          lastError = err;
+        }
+      }
+    }
+
     if (fixtureAllowed && fixturePath) {
       return {
         provider: { name: resolvedProviderName ?? attemptedProviders[0] ?? null, resolution: "local_fixture" },
@@ -134,7 +167,7 @@ export function createResolver({
 
     if (noExtractor.length > 0) {
       throw new ProviderError(
-        `No real stream source is available for this title (no supported extractor in: ${noExtractor.join(", ")}). VegaMovies search results can play real sources.`,
+        `No real stream source is available for this title (no supported extractor in: ${noExtractor.join(", ")}; title-based source lookup also found no playable match).`,
         "unsupported"
       );
     }

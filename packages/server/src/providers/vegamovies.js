@@ -127,6 +127,56 @@ export function parseVegaSearch(json) {
     .filter(Boolean);
 }
 
+export function normalizeForMatch(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+export function scoreTitleMatch(query, candidateTitle, candidateYear, wantedYear) {
+  const q = normalizeForMatch(query);
+  const t = normalizeForMatch(candidateTitle);
+  if (!q || !t) return 0;
+
+  let score;
+  if (t === q) score = 1000;
+  else if (t.startsWith(`${q} `)) score = 700 - Math.min(100, t.length - q.length);
+  else if (t.startsWith(q)) score = 650;
+  else if (new RegExp(`(?:^| )${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: |$)`).test(t)) score = 500;
+  else if (q.split(" ").every((token) => t.split(" ").includes(token))) score = 400;
+  else if (t.includes(q)) score = 300;
+  else {
+    const qTokens = q.split(" ").filter(Boolean);
+    const tTokens = new Set(t.split(" ").filter(Boolean));
+    const overlap = qTokens.filter((token) => tTokens.has(token)).length;
+    score = qTokens.length > 0 ? Math.round((overlap / qTokens.length) * 200) : 0;
+  }
+
+  if (wantedYear && candidateYear) {
+    const diff = Math.abs(Number(candidateYear) - Number(wantedYear));
+    if (diff === 0) score += 120;
+    else if (diff === 1) score += 60;
+    else if (diff > 3) score -= 80;
+  }
+  return score;
+}
+
+export function pickBestMatch(items, { title, year, minScore = 400 } = {}) {
+  let best = null;
+  let bestScore = 0;
+  for (const item of items) {
+    const score = scoreTitleMatch(title, item.title, item.year, year);
+    if (score > bestScore) {
+      bestScore = score;
+      best = item;
+    }
+  }
+  return bestScore >= minScore ? { item: best, score: bestScore } : null;
+}
+
 function absoluteUrl(base, value) {
   if (!value) return null;
   if (/^https?:\/\//i.test(value)) return value;
@@ -256,6 +306,32 @@ export class VegaMoviesProvider extends BaseProvider {
     }
 
     return item;
+  }
+
+  async resolveByTitle({ title, year = null, type = "movie" } = {}) {
+    if (!title) {
+      throw new ProviderError("title is required for title-based resolution", "validation");
+    }
+    const items = await this.search(title);
+    const candidates = items.filter((item) => !type || item.type === type);
+    const best = pickBestMatch(candidates.length > 0 ? candidates : items, { title, year });
+    if (!best) {
+      throw new ProviderError(
+        `VegaMovies has no close match for "${title}"${year ? ` (${year})` : ""}`,
+        "not_found"
+      );
+    }
+
+    const detail = await this.getDetails(best.item.type, best.item.id);
+    const source = await this.resolveStream(detail);
+    return {
+      ...source,
+      note: `Resolved via VegaMovies title match: "${best.item.title}"${best.item.year ? ` (${best.item.year})` : ""}, match score ${best.score}`,
+      matchedTitle: best.item.title,
+      matchedYear: best.item.year ?? null,
+      matchScore: best.score,
+      pageUrl: detail.sourceUrl
+    };
   }
 
   async resolveStream(detail) {

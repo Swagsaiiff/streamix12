@@ -8,6 +8,36 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Real-playback bug fix (progressive HLS + remux) and stale provider status
 
+## Three fixes: CineStream real playback, search grid, search relevance
+
+### 1. CineStream titles now play real streams (title bridge)
+
+- **Blocker fixed:** CineStream is metadata-only (no extractor); its ids are IMDb ids, so its titles previously ended in `No real stream source is available`.
+- **Implementation:** `VegaMoviesProvider.resolveByTitle({ title, year, type })` searches the real VegaMovies index, scores candidates (`normalizeForMatch`, `scoreTitleMatch`, `pickBestMatch` with `minScore 400`), fetches the matched detail page and runs the existing real extractor chain. `extractor.js` calls it after the per-provider loop when a provider has no extractor, and reports `resolution.status=provider_stream`, `provider=VegaMovies`, `resolution.requestedProvider`, `matchedBy: "title"`, `matchScore`.
+- **Verified:** `POST /api/stream/movie/tt1877830?provider=CineStream` (The Batman 2022) → `provider_stream` via VegaMovies title match (score 1120), 13.4 s, 2 audio tracks, mode `transcode`. Honest negative: `POST /api/stream/movie/tt2005151?provider=CineStream` (War Dogs 2016) → 422 because VegaMovies genuinely has no such title (its search returns other "war" films scored < 400) — no fabrication, no fixture.
+
+### 2. Search results: responsive grid (was one horizontal row)
+
+- New `packages/client/src/components/Grid.jsx`; `App.jsx` renders search results with `<Grid>` instead of `<Row>`.
+- CSS `.grid`: `grid-template-columns: repeat(auto-fill, minmax(150px, 1fr))` with breakpoints at 1024 px (135 px) and 640 px (110 px); `.grid .card` fills the column so poster sizes are consistent.
+- **Measured (Puppeteer + Edge, query "batman"):** 1440 px → 8 columns, 900 px → 5 columns, 390 px → 2 columns; card width uniform (~154 px); poster ratio 1.5 (2:3); multiple rows. Homepage rows unchanged.
+
+### 3. Search relevance ranking
+
+- `routes/search.js`: `normalizeTitle` (lowercase, NFKD, strip diacritics + punctuation) and `relevanceScore` (exact 1000 > starts-with 800/750 > word-boundary 600 > all-tokens 450 > contains 350 > token-overlap ≤200) with `rankSearchResults` (score desc, then newer year, then source order). Applied after the multi-provider merge.
+- **Verified live:** `q=batman` → "Batman" (1989), "Batman" (1966) first, then prefixes; `q=the batman` → "The Batman" (2022) first; `q=Spider-Man: No Way Home` → exact 2021 entry first despite 40+ variants.
+
+### Tests
+
+- `npm run test` → **74/74 pass** (added relevance/normalization/ranking tests and VegaMovies `normalizeForMatch`/`scoreTitleMatch`/`pickBestMatch` tests; two initial test cases were corrected where the fixture titles genuinely started with the query).
+- `npm run build` → OK.
+
+### Remaining playback blockers
+
+- Titles whose name/year do not closely match any VegaMovies post return an explicit 422 (real gap, not a bug).
+- Non-H.264/non-AAC sources still transcode (slower start; mode reported).
+- VegaMovies series episode extraction still not ported; Bollyflix/MoviesDrive/Moviesmod remain Cloudflare-blocked.
+
 ### Reproduced failure
 
 - `POST /api/stream/movie/<vega permalink>?provider=VegaMovies` with the default `.env` (no `STREAMIX_SESSION_MAX_SECONDS`) never returned until a **full VOD transcode** of a 963 MB movie finished: `createSession` awaited FFmpeg exit and `-hls_playlist_type vod` only writes playlists at the end. Play therefore hung on "Resolving stream and preparing HLS..." — the reported blue/stuck state. Verified working earlier only because a 45 s cap env var was set.

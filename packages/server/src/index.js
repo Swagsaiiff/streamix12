@@ -33,14 +33,36 @@ const resolver = createResolver({
 
 const app = express();
 const PORT = config.port;
+const VERSION = "0.3.0";
 
 app.use(express.json({ limit: "16kb" }));
+
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    name: "streamix-server",
+    version: VERSION,
+    service: "STREAMIX API (this is the backend; the web UI is served separately by Vite)",
+    client: "http://localhost:5173",
+    endpoints: [
+      "GET  /api/health",
+      "GET  /api/home/trending",
+      "GET  /api/home/latest",
+      "GET  /api/home/popular-series",
+      "GET  /api/search?q=<query>",
+      "GET  /api/detail/:type/:id?provider=<name>",
+      "GET  /api/providers/status",
+      "POST /api/stream/:type/:id?provider=<name>",
+      "GET  /api/stream/:sessionId/master.m3u8"
+    ]
+  });
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     name: "streamix-server",
-    version: "0.3.0",
+    version: VERSION,
     time: new Date().toISOString()
   });
 });
@@ -58,6 +80,14 @@ app.use(
   })
 );
 app.use("/api", providersRouter({ fixtureFallback: config.fixtureFallback }));
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "not_found",
+    message: `No route for ${req.method} ${req.originalUrl}`,
+    hint: "API routes live under /api/*. See GET / for the endpoint list. The web UI runs on http://localhost:5173"
+  });
+});
 
 app.listen(PORT, async () => {
   logger.info("server.start", { port: PORT, provider: provider.getName(), tmdbEnrichment: enricher.isEnabled ? "enabled" : "disabled" });

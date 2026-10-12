@@ -3,6 +3,7 @@ import { fetchHomeSections, fetchSearch, fetchDetail } from "./api.js";
 import Navbar from "./components/Navbar.jsx";
 import Hero from "./components/Hero.jsx";
 import Row from "./components/Row.jsx";
+import Grid from "./components/Grid.jsx";
 import SkeletonRow from "./components/SkeletonRow.jsx";
 import DetailModal from "./components/DetailModal.jsx";
 import Player from "./components/Player.jsx";
@@ -175,11 +176,7 @@ export default function App() {
             <p className="muted">No results found.</p>
           )}
           {searchState === "done" && searchResult?.count > 0 && (
-            <Row
-              title={`Found ${searchResult.count} titles`}
-              items={searchResult.items}
-              onSelect={openDetail}
-            />
+            <Grid items={searchResult.items} onSelect={openDetail} />
           )}
         </section>
       ) : (

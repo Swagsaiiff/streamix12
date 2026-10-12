@@ -13,8 +13,43 @@ import {
   isPlaceholderMedia,
   candidateRank,
   selectMediaCandidates,
+  normalizeForMatch,
+  scoreTitleMatch,
+  pickBestMatch,
   VegaMoviesProvider
 } from "./vegamovies.js";
+
+test("scoreTitleMatch prefers exact, then prefix, then partial matches", () => {
+  const exact = scoreTitleMatch("War Dogs", "War Dogs", 2016, 2016);
+  const prefix = scoreTitleMatch("War Dogs", "War Dogs: The Story", null, 2016);
+  const partial = scoreTitleMatch("War Dogs", "Dogs of War", null, 2016);
+  const none = scoreTitleMatch("War Dogs", "The Matrix", null, 1999);
+  assert.ok(exact > prefix);
+  assert.ok(prefix > partial);
+  assert.equal(none, 0);
+});
+
+test("scoreTitleMatch rewards the matching year and penalises far-off years", () => {
+  const sameYear = scoreTitleMatch("Dune", "Dune", 2021, 2021);
+  const offYear = scoreTitleMatch("Dune", "Dune", 1984, 2021);
+  assert.ok(sameYear > offYear);
+});
+
+test("pickBestMatch chooses the closest real provider page", () => {
+  const items = [
+    { id: "/dogs-of-war/", title: "Dogs of War", year: 2023, type: "movie" },
+    { id: "/war-dogs-2016/", title: "War Dogs", year: 2016, type: "movie" },
+    { id: "/war-dogs-2/", title: "War Dogs", year: 2024, type: "movie" }
+  ];
+  const best = pickBestMatch(items, { title: "War Dogs", year: 2016 });
+  assert.equal(best.item.id, "/war-dogs-2016/");
+
+  assert.equal(pickBestMatch(items, { title: "Completely Unrelated", year: 1999 }), null);
+});
+
+test("normalizeForMatch strips punctuation and case", () => {
+  assert.equal(normalizeForMatch("Spider-Man: Across the Spider-Verse!"), "spider man across the spider verse");
+});
 
 test("placeholder media (unpkg/site.webm) is excluded from candidates", () => {
   assert.equal(isPlaceholderMedia("https://unpkg.com/site.webm"), true);
