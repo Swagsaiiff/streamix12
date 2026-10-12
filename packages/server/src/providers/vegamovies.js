@@ -95,20 +95,56 @@ export function extractHostLinks(html) {
 
 export function extractLinkPages(html, baseUrl) {
   const ordered = new Map();
-  for (const match of html.matchAll(/<a\s+([^>]*)>([\s\S]*?)<\/a>/gi)) {
-    const href = (match[1].match(/href="([^"]+)"/i) || [])[1];
+  let heading = null;
+  const combined = /(<h[3-5][^>]*>[\s\S]*?<\/h[3-5]>)|(<a\s+([^>]*)>([\s\S]*?)<\/a>)/gi;
+  for (const match of html.matchAll(combined)) {
+    if (match[1]) {
+      heading = match[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
+      continue;
+    }
+    const attrs = match[3] ?? "";
+    const inner = match[4] ?? "";
+    const href = (attrs.match(/href="([^"]+)"/i) || [])[1];
     if (!href) continue;
-    const label = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const label = inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const absolute = href.startsWith("http") ? href : new URL(href, baseUrl).href;
     if (NOISE_LINK_PATTERN.test(absolute)) continue;
-    const isDownloadButton = /dwd-button/i.test(match[2]);
+    const isDownloadButton = /dwd-button/i.test(inner);
     const isHostLink = HOST_PATTERN.test(absolute);
     if (!isDownloadButton && !isHostLink) continue;
     if (!ordered.has(absolute)) {
-      ordered.set(absolute, { url: absolute, label: label.slice(0, 60), kind: isDownloadButton ? "download" : "host" });
+      ordered.set(absolute, {
+        url: absolute,
+        label: label.slice(0, 60),
+        kind: isDownloadButton ? "download" : "host",
+        heading
+      });
     }
   }
   return Array.from(ordered.values());
+}
+
+// Quality declared by the page section heading, e.g. "… 1080p WEB-DL x264 [850MB/E]".
+export function declaredQuality(heading) {
+  const match = String(heading ?? "").match(/(\d{3,4})\s*p/i);
+  return match ? Number(match[1]) : null;
+}
+
+export function sortVariantsByQuality(variants) {
+  const byHeight = new Map();
+  for (const variant of variants) {
+    if (!variant?.url) continue;
+    const height = Number(variant.height) || 0;
+    const current = byHeight.get(height);
+    if (!current) {
+      byHeight.set(height, variant);
+      continue;
+    }
+    // Same resolution: keep the one from the more reliable direct host (signed CDN over mirror).
+    const reliable = (u) => (/r2\.dev|cloudflarestorage\.com/i.test(u) ? 2 : /pixeldrain/i.test(u) ? 0 : 1);
+    if (reliable(variant.url) > reliable(current.url)) byHeight.set(height, variant);
+  }
+  return Array.from(byHeight.values()).sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
 }
 
 export function extractDownloadPageLinks(html, baseUrl) {
@@ -491,7 +527,9 @@ export class VegaMoviesProvider extends BaseProvider {
         });
         return {
           ...source,
-          note: `Resolved via VegaMovies title match: "${item.title}"${item.year ? ` (${item.year})` : ""}, score ${score} (candidate ${index + 1} of ${ranked.length})`,
+          note: `Resolved via VegaMovies title match: "${item.title}"${item.year ? ` (${item.year})` : ""}, score ${score} (candidate ${index + 1} of ${ranked.length})${
+            source.quality ? `, quality ${source.quality}` : ""
+          }${source.variants?.length > 1 ? ` (${source.variants.length} qualities available)` : ""}`,
           matchedTitle: item.title,
           matchedYear: item.year ?? null,
           matchScore: score,
@@ -535,7 +573,9 @@ export class VegaMoviesProvider extends BaseProvider {
 
     // Movies expose `dwd-button` anchors; series pages link straight to host pages
     // (e.g. nexdrive) from quality sections. Handle both.
-    const linkPages = extractLinkPages(html, pageUrl).slice(0, 4);
+    // Series/movie pages list one link page per quality tier (480p/720p/1080p × mirrors), so
+    // inspect them all — capping this previously dropped the higher-quality tiers entirely.
+    const linkPages = extractLinkPages(html, pageUrl).slice(0, 12);
     logger.info("vega.link_pages", {
       page: hostOf(pageUrl),
       count: linkPages.length,
@@ -561,14 +601,18 @@ export class VegaMoviesProvider extends BaseProvider {
       pageInfos.push({
         url: linkPage.url,
         label: linkPage.label,
+        heading: linkPage.heading ?? null,
+        declared: declaredQuality(linkPage.heading),
         hostLinks,
         vcloud: hostLinks.filter((href) => /vcloud\./i.test(href)),
         usable: hostLinks.filter((href) => !/fastdl\.|filebee\./i.test(href))
       });
     }
+    // Prefer higher declared-quality tiers first when several cover the same episode.
+    pageInfos.sort((a, b) => (b.declared ?? 0) - (a.declared ?? 0));
     logger.info("vega.link_page_tiers", {
       page: hostOf(pageUrl),
-      tiers: pageInfos.map((p) => `${p.label} hosts=${p.hostLinks.length} vcloud=${p.vcloud.length}`)
+      tiers: pageInfos.map((p) => `${p.declared ?? "?"}p "${p.label}" hosts=${p.hostLinks.length} vcloud=${p.vcloud.length}`)
     });
 
     let orderedHostLinks = [];
@@ -618,41 +662,43 @@ export class VegaMoviesProvider extends BaseProvider {
         target: redactUrl(orderedHostLinks[wantedIndex] ?? null)
       });
 
-      for (const index of order.slice(0, 6)) {
-        const hostLink = orderedHostLinks[index];
-        const media = await this.mediaFromHost(hostLink, orderedHostReferer, base);
-        if (!media) {
-          logger.warn("vega.episode_link_unresolved", {
-            requested: `S${season}E${episode}`,
-            index,
-            host: hostOf(hostLink)
-          });
-          continue;
+      // Resolve the same episode from each quality tier and keep the real resolutions, so the
+      // best rendition can be preferred (and lower ones offered as genuine variants).
+      const collected = [];
+      for (const info of pageInfos) {
+        const list = info.vcloud.length > 0 ? info.vcloud : info.usable;
+        if (list.length === 0) continue;
+        const index = wantedIndex != null && wantedIndex < list.length ? wantedIndex : 0;
+        const variants = await this.mediaVariantsFromHost(list[index], info.url, { maxProbes: 2 });
+        for (const variant of variants) {
+          if (!collected.some((v) => v.url === variant.url)) {
+            collected.push({ ...variant, declared: info.declared, label: info.label });
+          }
         }
-        // If the media filename exposes an episode tag, it must match the request.
-        const tag = episodeFromUrl(media);
-        if (tag && (tag.season !== Number(season) || tag.episode !== Number(episode))) {
-          logger.warn("vega.episode_tag_mismatch", {
-            requested: `S${season}E${episode}`,
-            found: `S${tag.season}E${tag.episode}`,
-            index
-          });
-          continue;
-        }
+      }
+
+      const episodeTagOk = (variant) => {
+        const tag = episodeFromUrl(variant.url);
+        return !tag || (tag.season === Number(season) && tag.episode === Number(episode));
+      };
+      const valid = sortVariantsByQuality(collected.filter(episodeTagOk));
+      if (valid.length > 0) {
+        const chosen = valid[0];
         logger.info("vega.media_validated", {
-          host: hostOf(media),
-          index,
           requested: `S${season}E${episode}`,
-          tag: tag ? `S${tag.season}E${tag.episode}` : "untagged",
-          url: redactUrl(media)
+          best: `${chosen.height}p`,
+          variants: valid.map((v) => `${v.height}p`),
+          url: redactUrl(chosen.url)
         });
         return {
-          url: media,
+          url: chosen.url,
+          variants: valid.slice(0, 3),
           headers: { Referer: `${base}/` },
-          mediaType: media.includes(".m3u8") ? "hls" : "mkv",
+          mediaType: chosen.url.includes(".m3u8") ? "hls" : "mkv",
           sourceType: "provider",
-          episode: tag ?? { season: Number(season), episode: Number(episode) },
-          note: `Resolved from VegaMovies (real provider source; ${chosenLabel ? `section "${chosenLabel}", ` : ""}episode S${season}E${episode})`
+          episode: episodeFromUrl(chosen.url) ?? { season: Number(season), episode: Number(episode) },
+          quality: `${chosen.height}p`,
+          note: `Resolved from VegaMovies (real provider source; ${chosenLabel ? `section "${chosenLabel}", ` : ""}episode S${season}E${episode}, best quality ${chosen.height}p of ${valid.length} available)`
         };
       }
 
@@ -707,6 +753,20 @@ export class VegaMoviesProvider extends BaseProvider {
       }
     }
 
+    // Movie path: gather genuine quality variants across the per-quality link pages as well,
+    // so a 480p mirror is never the only rendition offered when 720p/1080p exist.
+    const movieVariants = [];
+    for (const info of pageInfos) {
+      const list = info.vcloud.length > 0 ? info.vcloud : info.usable.length > 0 ? info.usable : info.hostLinks;
+      if (list.length === 0) continue;
+      const found = await this.mediaVariantsFromHost(list[0], info.url, { maxProbes: 2 });
+      for (const variant of found) {
+        if (!movieVariants.some((v) => v.url === variant.url)) {
+          movieVariants.push({ ...variant, declared: info.declared, label: info.label });
+        }
+      }
+    }
+
     const ranked = selectMediaCandidates(candidates);
     const selection = pickCandidateForEpisode(ranked, { season, episode });
     logger.info("vega.extraction_candidates", {
@@ -730,7 +790,18 @@ export class VegaMoviesProvider extends BaseProvider {
       );
     }
 
-    const ordered = selection.url ? [selection.url, ...ranked.filter((url) => url !== selection.url)] : ranked;
+    // Prefer the highest real resolution discovered across the quality tiers.
+    const bestVariants = sortVariantsByQuality(movieVariants);
+    const ordered = bestVariants.length > 0
+      ? [
+          ...bestVariants.map((v) => v.url),
+          ...(selection.url ? [selection.url] : []),
+          ...ranked.filter((url) => !bestVariants.some((v) => v.url === url))
+        ]
+      : selection.url
+        ? [selection.url, ...ranked.filter((url) => url !== selection.url)]
+        : ranked;
+
     for (const candidate of ordered) {
       const playable = await withRetry(
         async () => {
@@ -748,15 +819,18 @@ export class VegaMoviesProvider extends BaseProvider {
       logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable, url: redactUrl(candidate) });
       if (playable) {
         logger.info("vega.media_validated", { host: hostOf(candidate), mediaType: candidate.includes(".m3u8") ? "hls" : "mkv" });
+        const height = bestVariants.find((v) => v.url === candidate)?.height ?? null;
         return {
           url: candidate,
+          variants: bestVariants.length > 1 ? bestVariants.slice(0, 3) : undefined,
           headers: { Referer: `${base}/` },
           mediaType: candidate.includes(".m3u8") ? "hls" : "mkv",
           sourceType: "provider",
           episode: episodeFromUrl(candidate),
-          note: chosenLabel
-            ? `Resolved from VegaMovies (real provider source; page section: "${chosenLabel}")`
-            : "Resolved from VegaMovies (real provider source)"
+          quality: height ? `${height}p` : null,
+          note: `Resolved from VegaMovies (real provider source${chosenLabel ? `; section "${chosenLabel}"` : ""}${height ? `, best quality ${height}p` : ""}${
+            bestVariants.length > 1 ? ` of ${bestVariants.length} available` : ""
+          })`
         };
       }
     }
@@ -796,6 +870,85 @@ export class VegaMoviesProvider extends BaseProvider {
       if (playable) return candidate;
     }
     return null;
+  }
+
+  // Like mediaFromHost, but returns every playable candidate with its real (ffprobe) height,
+  // so the caller can offer genuine quality variants without trusting page labels.
+  async mediaVariantsFromHost(hostLink, referer, { maxProbes = 3 } = {}) {
+    const collections = await this.mediaCandidatesForHost(hostLink, referer);
+    const variants = [];
+    for (const candidate of collections.slice(0, maxProbes)) {
+      // Retry only transient probing failures; the same candidate is retried, never another episode.
+      const height = await withRetry(
+        async () => {
+          const value = await this.probeHeight(candidate, referer);
+          if (!value) throw new Error("ffprobe rejected the candidate media URL (404/invalid data/unsupported)");
+          return value;
+        },
+        {
+          retries: 1,
+          delayMs: 300,
+          onRetry: (error, attempt) =>
+            logger.warn("vega.media_retry", { host: hostOf(candidate), attempt, reason: String(error.message).slice(0, 80) })
+        }
+      ).catch(() => null);
+      if (height) variants.push({ url: candidate, height });
+    }
+    return variants;
+  }
+
+  async probeHeight(url, referer) {
+    const { spawn } = await import("node:child_process");
+    return new Promise((resolve) => {
+      if (isPlaceholderMedia(url)) {
+        resolve(null);
+        return;
+      }
+      let settled = false;
+      let out = "";
+      const proc = spawn(
+        this.ffprobePath,
+        ["-v", "error", "-headers", `Referer: ${referer}\r\n`, "-show_entries", "stream=codec_type,height", "-of", "json", url],
+        { windowsHide: true }
+      );
+      proc.stdout?.on("data", (data) => {
+        out += data.toString();
+      });
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try {
+            proc.kill("SIGTERM");
+          } catch {
+            // already gone
+          }
+          resolve(null);
+        }
+      }, 20000);
+      proc.on("error", () => {
+        clearTimeout(timer);
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      });
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(out);
+          const video = (parsed.streams ?? []).find((s) => s.codec_type === "video");
+          resolve(Number(video?.height) || null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
   }
 
   // Returns the ordered media candidates reachable from one host link page.

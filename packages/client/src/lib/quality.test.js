@@ -27,8 +27,8 @@ test("qualityLabel falls back to bitrate only when no resolution exists", () => 
 test("realLevels keeps only real, unique levels", () => {
   const real = realLevels([{ height: 1080 }, { height: 720 }, { height: 720 }, {}]);
   assert.deepEqual(real, [
-    { value: 0, label: "1080p" },
-    { value: 1, label: "720p" }
+    { value: 0, label: "1080p", height: 1080 },
+    { value: 1, label: "720p", height: 720 }
   ]);
 });
 
@@ -84,4 +84,12 @@ test("currentQualityValue reports Auto when adaptivity is on and the level other
 
 test("applyQuality tolerates a missing hls instance", () => {
   assert.equal(applyQuality(null, 1), AUTO_QUALITY);
+});
+
+test("quality options are ordered highest-first while keeping the real level index", () => {
+  const { options } = buildQualityOptions([{ height: 640 }, { height: 1080 }, { height: 720 }], AUTO_QUALITY);
+  assert.deepEqual(options.map((o) => o.label), ["Auto", "1080p", "720p", "640p"]);
+  // 1080p sits at hls level index 1, and that real index is what the selector submits.
+  assert.equal(options.find((o) => o.label === "1080p").value, 1);
+  assert.equal(options.find((o) => o.label === "640p").value, 0);
 });

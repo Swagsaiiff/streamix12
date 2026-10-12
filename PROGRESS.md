@@ -18,6 +18,57 @@ Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty 
 
 ## Intermittent series playback failures: root cause and fix
 
+## Playback quality: 360p-only complaint fixed (+ genuine multi-quality HLS)
+
+### Root cause of "Don't Come Home only plays at 360p"
+
+- The title page exposes **9 link pages** (`⚡ G-Direct [Instant]`, `⚡ V-Cloud [Resumable]`, `⚡ Batch/Zip`)
+  grouped by declared quality: **480p, 720p, 1080p**. Two defects made playback stick to the lowest tier:
+  1. `extractLinkPages(...).slice(0, 4)` inspected only the first four link pages, so the 720p/1080p
+     tiers were **never seen** (logs showed only 480p tiers considered).
+  2. The resolver took the **first** resolvable tier rather than the best one — the 480p tier's
+     pixeldrain mirror is a 360p copy, so the player showed 360p even though 1080p existed.
+- Also: tiers were not ordered by their declared quality, and top-level `quality` was dropped when the
+  resolution came through the CineStream→VegaMovies title bridge.
+
+### Fixes
+
+- `extractLinkPages` now captures the section **heading** and the resolver reads the declared quality
+  from it (`declaredQuality("… 1080p WEB-DL …") → 1080`), then inspects **all** link pages (cap 12)
+  and orders tiers by declared quality descending.
+- Every tier is probed with **ffprobe** (`mediaVariantsFromHost` → `probeHeight`), so selection uses the
+  *real* resolution rather than the page label; the best real rendition is chosen and the rest are kept
+  as genuine variants (`sortVariantsByQuality` dedupes by height, preferring signed CDN over mirrors).
+- `quality`, `variants` and `variantCount` are propagated through `extractor.js` → `routes/stream.js`.
+- **Genuine multi-quality HLS**: `createSession(source, { variants })` now builds a real ladder when ≥2
+  renditions exist — one FFmpeg input per rendition, one video variant per input, and the primary
+  source's audio renditions **shared across all variants** (so audio switching keeps working at every
+  quality). `buildMultiVariantMasterPlaylist()` writes the master from ffprobe data. Single-rendition
+  sources keep the previous single-variant behaviour, and any multi-variant failure surfaces as a clear
+  error (ffmpeg stderr) rather than silent degradation.
+- Client: quality options are now ordered **highest-first** while still submitting the real hls.js level
+  index; audio options show full language names.
+
+### Live verification (real providers)
+
+| Case | Before | After |
+| --- | --- | --- |
+| "Don't Come Home" S1E2 (series) | 360p | **1080p** (variants 1080p + 640p) |
+| "Dune" (2021) movie | 480p | **2160p (4K)** (variants 2160p / 816p / 804p) |
+| Series master playlist | 1 video variant | 1080p + 640p variants + 3 shared audio renditions (hin/eng/tha, 5.1) |
+| Player (browser, S1E2) | quality selector disabled "Auto" | selector **enabled**: `Auto / 1080p / 640p`; switching applies the real level (1080p verified); audio `Hindi / English / Thai`; `readyState 4`; 0 page errors |
+
+- `npm run test` → **131/131 pass** (97 server + 34 client) including new tests for declared-quality
+  parsing, variant ordering/dedupe, highest-first option ordering, and the retry-without-episode-switch path.
+- `npm run build` → OK. Stale HLS workspaces were purged (876 MB → 6 MB, and boot-time purge remains).
+
+### Remaining limitations
+
+- The ladder is capped at 3 renditions and re-encodes only when a rendition is not H.264/AAC (mixed
+  tiers fall back to libx264/aac for the whole ladder, reported via `streamMode`).
+- If a title only exposes `G-Direct` (fastdl/filebee) tiers with no vcloud links, playback still returns
+  an explicit error — those hosts remain non-portable.
+
 ### Reproduced failing case
 
 `POST /api/stream/series/tt31158589?provider=CineStream&season=1&episode=1` ("Don't Come Home", 2024) →

@@ -25,9 +25,10 @@ export function realLevels(levels = []) {
     const label = qualityLabel(level);
     if (!label || seen.has(label)) return;
     seen.add(label);
-    list.push({ value: index, label });
+    list.push({ value: index, label, height: Number(level?.height) || 0 });
   });
-  return list;
+  // Display highest quality first; `value` keeps the real hls.js level index for switching.
+  return list.sort((a, b) => b.height - a.height);
 }
 
 export function buildQualityOptions(levels = [], currentLevel = AUTO_QUALITY) {

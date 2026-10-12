@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { sendError } from "../errors.js";
 import { logger } from "../logger.js";
+import { ProviderError } from "../providers/base.js";
 
 const SESSION_ID_RE = /^[a-f0-9]{64}$/;
 const FILE_RE = /^[A-Za-z0-9._-]+$/;
@@ -64,7 +65,8 @@ export function streamRouter({
           .createSession(stream.sourceUrl, {
             preferredLanguage,
             maxSeconds: sessionMaxSeconds,
-            headers: stream.headers ?? {}
+            headers: stream.headers ?? {},
+            variants: stream.variants ?? null
           })
           .finally(() => inflightSessions.delete(dedupeKey));
         inflightSessions.set(dedupeKey, sessionPromise);
@@ -78,6 +80,8 @@ export function streamRouter({
         sessionId: session.sessionId,
         provider: stream.provider,
         resolution: stream.resolution,
+        quality: stream.resolution?.quality ?? null,
+        qualities: Array.isArray(stream.variants) ? stream.variants.map((variant) => `${variant.height}p`) : null,
         status: session.status,
         streamMode: session.mode,
         streamModeReason: session.streamMode?.reason ?? null,
@@ -91,7 +95,11 @@ export function streamRouter({
         playlistUrl: `/api/stream/${session.sessionId}/master.m3u8`
       });
     } catch (err) {
-      logger.warn("stream.resolve_failed", { type, id, code: err.code ?? "internal" });
+      if (err instanceof ProviderError) {
+        logger.warn("stream.resolve_failed", { type, id, code: err.code, reason: String(err.message).slice(0, 200) });
+      } else {
+        logger.error("stream.unexpected_error", { type, id, reason: String(err?.message).slice(0, 300), stack: String(err?.stack ?? "").split("\n").slice(0, 4).join(" | ") });
+      }
       return sendError(res, err);
     }
   });

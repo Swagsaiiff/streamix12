@@ -151,9 +151,12 @@ export function createResolver({
               requestedProvider: resolvedProviderName,
               matchedBy: "title",
               matchScore: source.matchScore ?? null,
+              quality: source.quality ?? null,
+              variantCount: source.variants?.length ?? 1,
               matchesTried: source.attempts?.filter((attempt) => !attempt.ok).length ?? 0
             },
             sourceUrl: source.url,
+            variants: source.variants ?? null,
             headers: source.headers ?? {},
             mediaType: source.mediaType ?? null,
             episode: source.episode ?? null,

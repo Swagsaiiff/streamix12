@@ -139,10 +139,10 @@ test("resolveStream retries a temporary host failure but never switches the requ
     throw new Error(`unexpected fetch ${url}`);
   };
   let probes = 0;
-  provider.isPlayableMedia = async (url) => {
+  provider.probeHeight = async (url) => {
     probes += 1;
     if (url === mediaUrl && probes === 1) throw new Error("ETIMEDOUT");
-    return url === mediaUrl;
+    return url === mediaUrl ? 720 : null;
   };
 
   const source = await provider.resolveStream(

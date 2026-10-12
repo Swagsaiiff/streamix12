@@ -17,6 +17,7 @@ const COPY_VIDEO_CODECS = new Set(["h264"]);
 const COPY_AUDIO_CODECS = new Set(["aac"]);
 const PLAYLIST_READY_TIMEOUT_MS = 45000;
 const DEFAULT_SESSION_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const MAX_VARIANTS = 3;
 
 const activeSessions = new Map();
 const pendingQueue = [];
@@ -120,14 +121,16 @@ const AUDIO_CODEC_TAGS = {
   mp3: "mp4a.40.34"
 };
 
+function normalizeName(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 export function buildMasterPlaylist({ video, audios, tracks, mode = "remux" }) {
   const lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-INDEPENDENT-SEGMENTS"];
 
-  const normalizeName = (value) =>
-    String(value ?? "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
   const seenNames = new Map();
   const uniqueName = (track, i) => {
     const hasLangInName = track.language && normalizeName(track.name).includes(normalizeName(track.language));
@@ -172,6 +175,55 @@ export function buildMasterPlaylist({ video, audios, tracks, mode = "remux" }) {
 
   lines.push(`#EXT-X-STREAM-INF:${streamInf.join(",")}`);
   lines.push("index_v0.m3u8");
+  return `${lines.join("\n")}\n`;
+}
+
+// Master playlist for a genuine multi-quality session: one video variant per provider
+// rendition plus the audio renditions shared across all variants (so audio switching works
+// at every quality). Every entry is derived from real ffprobe data.
+export function buildMultiVariantMasterPlaylist({ variants, audios, tracks, mode = "remux" }) {
+  const lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-INDEPENDENT-SEGMENTS"];
+
+  const outAudioCodec = mode === "remux" ? audios[0]?.codec_name : "aac";
+  const audioCodecTag = AUDIO_CODEC_TAGS[outAudioCodec] ?? AUDIO_CODEC_TAGS.aac;
+
+  const seenNames = new Map();
+  tracks.forEach((track, i) => {
+    const hasLangInName = track.language && normalizeName(track.name).includes(normalizeName(track.language));
+    let base = track.language && !hasLangInName ? `${track.name} (${track.language})` : track.name;
+    const count = seenNames.get(base) ?? 0;
+    seenNames.set(base, count + 1);
+    if (count > 0) base = `${base} #${count + 1}`;
+
+    const attrs = [
+      `TYPE=AUDIO`,
+      `GROUP-ID="aud"`,
+      `NAME="${base}"`,
+      `DEFAULT=${track.default ? "YES" : "NO"}`,
+      `AUTOSELECT=YES`
+    ];
+    if (track.language) attrs.push(`LANGUAGE="${track.language}"`);
+    if (audios[i]?.channels) attrs.push(`CHANNELS="${audios[i].channels}"`);
+    attrs.push(`URI="index_a${i}.m3u8"`);
+    lines.push(`#EXT-X-MEDIA:${attrs.join(",")}`);
+  });
+
+  const outVideoCodec = mode === "remux" ? variants[0]?.codecName : "h264";
+  const videoCodecTag = VIDEO_CODEC_TAGS[outVideoCodec] ?? VIDEO_CODEC_TAGS.h264;
+  const audioBitrate = audios.reduce((sum, a) => sum + (Number(a.bit_rate) || 128000), 0);
+
+  variants.forEach((variant, index) => {
+    const width = variant.width ?? 0;
+    const height = variant.height ?? 0;
+    const bandwidth = (Number(variant.bitrate) || width * height * 3 || 1500000) + audioBitrate;
+    const streamInf = [`BANDWIDTH=${bandwidth}`];
+    if (width && height) streamInf.push(`RESOLUTION=${width}x${height}`);
+    streamInf.push(`CODECS="${[videoCodecTag, audioCodecTag].filter(Boolean).join(",")}"`);
+    streamInf.push(`AUDIO="aud"`);
+    lines.push(`#EXT-X-STREAM-INF:${streamInf.join(",")}`);
+    lines.push(`index_v${index + 1}.m3u8`);
+  });
+
   return `${lines.join("\n")}\n`;
 }
 
@@ -254,7 +306,138 @@ export function createStreamManager({
     }
   }
 
-  async function createSession(sourceUrl, { timeoutMs = DEFAULT_SESSION_TIMEOUT_MS, preferredLanguage = null, maxSeconds = 0, headers = {} } = {}) {
+  async function waitForMultiPlaylists(sessionDir, proc, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (proc.exitCode !== null && proc.exitCode !== 0) return "failed";
+
+      const ready =
+        existsSync(join(sessionDir, "index_v1.m3u8")) && existsSync(join(sessionDir, "seg_v1_000.ts"));
+      if (ready) return "streaming";
+
+      if (proc.exitCode === 0) return "ready";
+      if (Date.now() > deadline) return "timeout";
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  // Builds one HLS session from several provider renditions (one video variant each) that share
+  // the audio renditions of the primary source, so quality switching and audio switching both work.
+  async function createMultiVariantSession({ session, sessionDir, ladder, headers, preferredLanguage, maxSeconds, timeoutMs }) {
+    let stderr = "";
+    const probes = [];
+    for (const variant of ladder) {
+      const probe = await probeStreams(ffprobePath, variant.url, headers);
+      if (!probe.video) throw new Error(`variant ${variant.height ?? "?"}p has no video stream`);
+      probes.push({ ...probe, url: variant.url, declared: variant.declared ?? null });
+    }
+    const primary = probes[0];
+    const audios = primary.audios;
+    if (audios.length === 0) throw new Error("no audio streams found in the primary variant");
+
+    const { tracks } = buildAudioLayout(audios, preferredLanguage);
+    session.audioTracks = tracks;
+    session.availableQualities = probes.map((probe) => probe.video.height).filter(Boolean);
+
+    const allCopy =
+      probes.every((probe) => COPY_VIDEO_CODECS.has(probe.video.codec_name)) &&
+      audios.every((audio) => COPY_AUDIO_CODECS.has(audio.codec_name));
+    const videoCodec = allCopy ? "copy" : "libx264";
+    const audioCodec = allCopy ? "copy" : "aac";
+    session.mode = allCopy ? "remux" : "transcode";
+    session.streamMode = {
+      mode: session.mode,
+      video: videoCodec,
+      audio: audioCodec,
+      reason: `${allCopy ? "copy" : "transcode"} (multi-quality ladder: ${probes
+        .map((probe) => `${probe.video.height ?? "?"}p`)
+        .join(", ")})`
+    };
+
+    const maps = [];
+    probes.forEach((_probe, index) => maps.push("-map", `${index}:v:0`));
+    audios.forEach((_audio, index) => maps.push("-map", `0:a:${index}`));
+
+    const layoutParts = [];
+    probes.forEach((_probe, index) => layoutParts.push(`v:${index},agroup:aud,name:v${index + 1}`));
+    audios.forEach((_audio, index) => layoutParts.push(`a:${index},agroup:aud,name:a${index}`));
+
+    const args = [
+      "-y", "-hide_banner", "-loglevel", "error",
+      ...headerArgs(headers),
+      ...probes.flatMap((probe) => ["-i", probe.url]),
+      ...(maxSeconds > 0 ? ["-t", String(maxSeconds)] : []),
+      ...maps,
+      "-c:v", videoCodec,
+      "-c:a", audioCodec,
+      "-f", "hls",
+      "-hls_time", String(HLS_TIME),
+      "-hls_list_size", "0",
+      "-hls_playlist_type", "event",
+      "-hls_flags", "independent_segments",
+      "-var_stream_map", layoutParts.join(" "),
+      "-hls_segment_filename", "seg_%v_%03d.ts",
+      "index_%v.m3u8"
+    ];
+
+    session.status = "converting";
+    const proc = spawn(ffmpegPath, args, { cwd: sessionDir, windowsHide: true });
+    session.proc = proc;
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Already gone
+      }
+    }, timeoutMs);
+    proc.stderr.on("data", (data) => {
+      stderr = `${stderr}${data}`.slice(-4000);
+      session.stderr = stderr;
+    });
+    proc.on("error", (err) => {
+      session.error = `failed to spawn ffmpeg: ${err.message}`;
+    });
+
+    const readiness = await waitForMultiPlaylists(sessionDir, proc, playlistReadyTimeoutMs);
+    clearTimeout(timer);
+
+    if (readiness === "timeout") {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Already gone
+      }
+      throw new Error(`multi-quality ffmpeg did not produce playlists within ${playlistReadyTimeoutMs}ms${stderr ? `: ${stderr.slice(-300)}` : ""}`);
+    }
+    if (readiness === "failed") {
+      throw new Error(`multi-quality ffmpeg exited with code ${proc.exitCode}${stderr ? `: ${stderr.slice(-300)}` : ""}`);
+    }
+
+    await writeFile(
+      join(sessionDir, MASTER_PLAYLIST),
+      buildMultiVariantMasterPlaylist({
+        variants: probes.map((probe) => ({
+          width: probe.video.width,
+          height: probe.video.height,
+          bitrate: probe.video.bit_rate,
+          codecName: probe.video.codec_name
+        })),
+        audios,
+        tracks,
+        mode: session.mode
+      }),
+      "utf8"
+    );
+
+    session.status = readiness;
+    return session;
+  }
+
+  async function createSession(sourceUrl, { timeoutMs = DEFAULT_SESSION_TIMEOUT_MS, preferredLanguage = null, maxSeconds = 0, headers = {}, variants = null } = {}) {
+    // Only use a genuine multi-quality ladder when several real renditions are known.
+    const ladder = Array.isArray(variants) && variants.length >= 2
+      ? variants.filter((variant) => variant?.url).slice(0, MAX_VARIANTS)
+      : null;
     const sessionId = createHash("sha256").update(`${sourceUrl}:${Date.now()}:${Math.random()}`).digest("hex");
     const sessionDir = join(TEMP_DIR, sessionId);
     await mkdir(sessionDir, { recursive: true });
@@ -280,6 +463,9 @@ export function createStreamManager({
       let stderr = "";
       try {
         session.status = "probing";
+        if (ladder && ladder.length >= 2) {
+          return await createMultiVariantSession({ session, sessionDir, ladder, headers, preferredLanguage, maxSeconds, timeoutMs });
+        }
         const { video, audios } = await probeStreams(ffprobePath, sourceUrl, headers);
         if (!video) throw new Error("no video stream found in source");
         if (audios.length === 0) throw new Error("no audio streams found in source");
