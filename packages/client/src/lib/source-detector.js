@@ -122,39 +122,67 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
       }
     }
 
-    if (status === 401 || status === 403) {
-      return {
-        format: "blocked",
-        status,
-        isPlayable: false,
-        error: `Stream URL is blocked or expired (HTTP ${status})`
-      };
-    }
-
-    if (status === 404) {
-      return {
-        format: "not_found",
-        status: 404,
-        isPlayable: false,
-        error: "Stream media not found (HTTP 404)"
-      };
-    }
-
-    if (status === 410) {
-      return {
-        format: "expired",
-        status: 410,
-        isPlayable: false,
-        error: "Stream media link has expired (HTTP 410)"
-      };
-    }
-
     if (!res.ok && status !== 206) {
+      let errorDetail = "";
+      if (contentType.includes("application/json")) {
+        try {
+          const errJson = await res.json();
+          errorDetail = errJson.message || errJson.error || "";
+        } catch {
+          // ignore
+        }
+      }
+      if (!errorDetail) {
+        try {
+          const txt = await res.text();
+          if (txt && txt.length < 200 && !txt.startsWith("<")) {
+            errorDetail = txt;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (status === 401 || status === 403) {
+        return {
+          format: "blocked",
+          status,
+          isPlayable: false,
+          error: errorDetail
+            ? `Stream URL is blocked or expired (HTTP ${status}): ${errorDetail}`
+            : `Stream URL is blocked or expired (HTTP ${status})`
+        };
+      }
+
+      if (status === 404) {
+        return {
+          format: "not_found",
+          status: 404,
+          isPlayable: false,
+          error: errorDetail
+            ? `Stream media not found (HTTP 404): ${errorDetail}`
+            : "Stream media not found (HTTP 404)"
+        };
+      }
+
+      if (status === 410) {
+        return {
+          format: "expired",
+          status: 410,
+          isPlayable: false,
+          error: errorDetail
+            ? `Stream media link has expired (HTTP 410): ${errorDetail}`
+            : "Stream media link has expired (HTTP 410)"
+        };
+      }
+
       return {
         format: "error",
         status,
         isPlayable: false,
-        error: `Stream server returned HTTP ${status}`
+        error: errorDetail
+          ? `Stream server returned HTTP ${status}: ${errorDetail}`
+          : `Stream server returned HTTP ${status}`
       };
     }
 

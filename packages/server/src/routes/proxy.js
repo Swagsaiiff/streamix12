@@ -1,9 +1,53 @@
+import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { logger } from "../logger.js";
 
+// In-memory registry associating secure stream tokens with resolved upstream URLs and protected headers.
+// Keeps cookies, tokens, and provider headers server-side and never exposes them to the browser.
+const streamRegistry = new Map();
+const STREAM_TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+export function registerStreamToken({ url, headers = {}, provider = null }) {
+  const token = crypto.randomBytes(24).toString("hex");
+  const now = Date.now();
+
+  // Clean up expired tokens periodically
+  if (streamRegistry.size > 200) {
+    for (const [key, entry] of streamRegistry.entries()) {
+      if (now - entry.createdAt > STREAM_TOKEN_TTL_MS) {
+        streamRegistry.delete(key);
+      }
+    }
+  }
+
+  streamRegistry.set(token, {
+    url,
+    headers: { ...headers },
+    provider,
+    createdAt: now
+  });
+
+  return token;
+}
+
+export function getStreamByToken(token) {
+  if (!token || typeof token !== "string") return null;
+  const entry = streamRegistry.get(token);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > STREAM_TOKEN_TTL_MS) {
+    streamRegistry.delete(token);
+    return null;
+  }
+  return entry;
+}
+
+export function clearStreamTokens() {
+  streamRegistry.clear();
+}
+
 // Approved host patterns for media providers and CDNs
 const ALLOWED_HOST_PATTERN =
-  /^(?:[a-zA-Z0-9-]+\.)*(?:r2\.cloudflarestorage\.com|r2\.dev|pixeldrain\.com|hubcloud\.[a-z]+|vcloud\.[a-z]+|fastdl\.[a-z]+|nexdrive\.[a-z]+|filebee\.[a-z]+|vegadrive\.[a-z]+|gofile\.[a-z]+|gdflix\.[a-z]+|hubdrive\.[a-z]+|driveseed\.[a-z]+|driveleech\.[a-z]+|drivebot\.[a-z]+|gpdl\d*\.[a-z]+)$/i;
+  /^(?:[a-zA-Z0-9-]+\.)*(?:r2\.cloudflarestorage\.com|r2\.dev|pixeldrain\.(?:com|dev)|hubcloud\.[a-z0-9-]+|vcloud\.[a-z0-9-]+|fastdl\.[a-z0-9-]+|nexdrive\.[a-z0-9-]+|filebee\.[a-z0-9-]+|vegadrive\.[a-z0-9-]+|gofile\.[a-z0-9-]+|gdflix\.[a-z0-9-]+|hubdrive\.[a-z0-9-]+|driveseed\.[a-z0-9-]+|driveleech\.[a-z0-9-]+|drivebot\.[a-z0-9-]+|gpdl\d*\.[a-z0-9-]+|vegamovies\.[a-z0-9-]+)$/i;
 
 // Match private, loopback, link-local, carrier-grade NAT, or test addresses
 export function isPrivateOrLocalHost(hostname) {
@@ -110,10 +154,31 @@ export async function proxyMediaRequest(req, res) {
     return res.status(204).end();
   }
 
-  const rawUrl = req.query.url;
-  const validation = validateProxyUrl(rawUrl);
+  let targetUrl = null;
+  let serverHeaders = {};
+
+  if (req.query.token) {
+    const tokenRecord = getStreamByToken(req.query.token);
+    if (!tokenRecord) {
+      return res.status(404).json({
+        error: "proxy_error",
+        message: "Stream session token not found or expired"
+      });
+    }
+    targetUrl = tokenRecord.url;
+    serverHeaders = { ...tokenRecord.headers };
+  } else if (req.query.url) {
+    targetUrl = req.query.url;
+  } else {
+    return res.status(400).json({
+      error: "proxy_error",
+      message: "Missing 'token' or 'url' query parameter"
+    });
+  }
+
+  const validation = validateProxyUrl(targetUrl);
   if (!validation.valid) {
-    logger.warn("media_proxy.rejected", { url: rawUrl, reason: validation.reason, status: validation.status });
+    logger.warn("media_proxy.rejected", { url: targetUrl, reason: validation.reason, status: validation.status });
     return res.status(validation.status).json({
       error: "proxy_error",
       message: validation.reason
@@ -124,7 +189,15 @@ export async function proxyMediaRequest(req, res) {
   let redirects = 0;
   const clientAbortController = new AbortController();
 
-  req.on("close", () => {
+  // Downstream disconnect detection:
+  // res emits "close" when the connection terminates.
+  // Abort only when res.writableEnded is false (i.e. client prematurely closed socket before response finished).
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      clientAbortController.abort();
+    }
+  });
+  res.on("error", () => {
     clientAbortController.abort();
   });
 
@@ -132,18 +205,22 @@ export async function proxyMediaRequest(req, res) {
     let upstreamRes = null;
 
     while (redirects <= MAX_REDIRECTS) {
-      const headers = {};
+      // Start with server-stored headers (e.g. Referer, cookies) without exposing them to browser
+      const headers = { ...serverHeaders };
+
       if (req.headers["range"]) {
         headers["Range"] = req.headers["range"];
       }
       if (req.headers["accept"]) {
         headers["Accept"] = req.headers["accept"];
       }
-      headers["User-Agent"] =
-        req.headers["user-agent"] ||
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+      if (!headers["User-Agent"]) {
+        headers["User-Agent"] =
+          req.headers["user-agent"] ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+      }
 
-      if (req.query.referer) {
+      if (req.query.referer && !headers["Referer"]) {
         headers["Referer"] = req.query.referer;
       }
 
@@ -198,7 +275,7 @@ export async function proxyMediaRequest(req, res) {
       return res.status(502).json({ error: "proxy_error", message: "Failed to connect to upstream media host" });
     }
 
-    // Forward status code
+    // Forward status code (e.g. 206 Partial Content, 200 OK, 304, 404, 410)
     res.status(upstreamRes.status);
 
     // Forward relevant media response headers

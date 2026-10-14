@@ -15,38 +15,33 @@ Phase 4: Client-Side-First Range Playback & Secure Backend Media Proxy (`main`).
    - Browser client-side demuxing (`mediabunny` / `libav.js`) requires reading byte ranges via `fetch()`. The browser blocked the cross-origin request with a CORS error, causing playback to fail with `Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires CORS access.`
 
 ### 2. Implemented Architecture & Fixes
-1. **Narrowly Scoped, Secure Backend Media Proxy (`packages/server/src/routes/proxy.js`)**:
-   - Exposed `GET /api/stream/proxy?url=<encodedUrl>` and `ALL /api/proxy`.
-   - **Zero-Buffering Stream Piping**: Uses Node.js `Readable.fromWeb(upstreamRes.body).pipe(res)` to stream byte ranges directly without loading media files into server memory.
-   - **Range Request Forwarding**: Forwards incoming `Range` headers (e.g. `bytes=0-511` or seeking offsets) and upstream status codes (`206 Partial Content`, `200 OK`, `304`, `404`, `410`).
-   - **Header Forwarding**: Preserves upstream `Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `Content-Disposition`, `ETag`, and `Last-Modified`.
-   - **SSRF Prevention**:
-     - Strict URL protocol validation (HTTP/HTTPS only).
-     - Private, loopback, and cloud metadata destination rejection (`localhost`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254`, IPv6 `::1`, link-local `fe80::`).
-     - Domain allowlist restricted to approved provider and CDN domains (`*.r2.cloudflarestorage.com`, `*.r2.dev`, `pixeldrain.com`, `*.hubcloud.*`, `*.vcloud.*`, `*.fastdl.*`, `*.nexdrive.*`, etc.).
-     - Redirect protection: manually follows redirects (up to 3 hops) and re-validates each redirect destination against private IP and domain allowlist rules before proceeding.
-   - **Cancellation & Cleanup**: Listens to client connection aborts (`req.on("close")`) and immediately cancels upstream fetch via `AbortController`.
-2. **Client-Side-First Playback Preservation (`Player.jsx` & `client-remux.js`)**:
-   - Preserved direct native playback for compatible browser sources (MP4, WebM, HLS, DASH).
-   - If direct probing is CORS-blocked, the client probes `/api/stream/proxy?url=...`. If available, the secure proxy is used strictly as a transport layer.
-   - The MKV stream is demuxed and converted into FastStart MP4 **in the browser** via `remuxMkvToMp4()` using `mediabunny` stream-copy in ~45ms, avoiding heavy server-side FFmpeg transcoding.
-   - Supported multi-audio switching through the proxy while preserving playback position.
-   - Maintained codec honesty: unsupported codecs (HEVC without browser hardware decoding, or E-AC-3 audio) are caught early by `inspectMkvSource()` and reported accurately.
-3. **Frontend Error Diagnosis**:
-   - Enhanced the Player error panel to distinguish:
-     1. Backend offline (HTTP 502): clear instruction to start backend with `npm run dev`.
-     2. CORS media restriction: explains media host cross-origin block and local proxy requirement.
-     3. Unsupported codec (E-AC-3 / HEVC): explicitly clarifies that a proxy cannot convert incompatible codecs without server transcoding.
-     4. Source resolution failures / expired links.
+1. **Downstream Disconnect & Safe Abort Handling (`proxy.js`)**:
+   - Fixed abort handling: replaced premature `req.on("close")` listener with downstream disconnect detection on `res.on("close")`. Upstream fetch is aborted only when `res.writableEnded` is false (i.e. client prematurely dropped socket before response finished). Normal response completion does not abort in-flight transfers.
+2. **Secure Stream Reference / Token System (`proxy.js` & `stream.js`)**:
+   - Implemented `registerStreamToken` and `getStreamByToken` in `proxy.js` with periodic TTL cleanup (4 hours).
+   - In `POST /api/stream/:type/:id`, registered the resolved upstream URL and required provider headers (e.g. `Referer: https://vegamovies.gallery/`, cookies) under a secure 24-byte hex token.
+   - Returned `streamToken` and `proxyUrl: /api/stream/proxy?token=<token>` to the client.
+   - Filtered sensitive headers (`Cookie`, `Set-Cookie`, `Authorization`, `X-Amz-*`, tokens) from the client JSON response via `sanitizeClientHeaders()`. Secrets and cookies remain server-side.
+   - In `proxyMediaRequest`, resolved `req.query.token` and automatically applied server-stored provider headers when making upstream requests.
+3. **Verified Legitimate CDN Domain Allowlist (`proxy.js`)**:
+   - Traced actual VegaMovies resolver URLs and verified legitimate CDN and host domains: `r2.cloudflarestorage.com`, `r2.dev`, `pixeldrain.com`, `pixeldrain.dev`, `hubcloud.*`, `vcloud.*`, `fastdl.*`, `nexdrive.*`, `filebee.*`, `vegadrive.*`, `gofile.*`, `gdflix.*`, `hubdrive.*`, `driveseed.*`, `driveleech.*`, `drivebot.*`, `gpdl*.*`, and `vegamovies.*`.
+   - Retained strict private network IP rejection (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254`, `::1`) and redirect destination validation.
+4. **Transparent Proxy Error Reporting (`Player.jsx` & `source-detector.js`)**:
+   - Enhanced `probeMediaSource` in `source-detector.js` to parse JSON/text error details from non-OK responses, preserving exact HTTP status and server error messages.
+   - In `Player.jsx`, eliminated error-swallowing in the proxy fallback path: when `proxyProbe` returns an error status (e.g. 403 or 502), the player immediately throws the actual proxy error (`proxyProbe.error`) instead of masking it as a generic CORS error.
+5. **Preserved Existing Client Playback & Dual-Audio Sample Clip**:
+   - Verified that browser-accessible sources (MP4, WebM, HLS, DASH) continue direct browser playback.
+   - Verified that the "Play Sample Clip" action (`/fixtures/multi-audio-test.mkv`) continues client-side MKV remuxing with AAC dual-audio switching (Hindi/English) and position preservation without backend dependencies.
 
 ### 3. Verification Evidence
-- `npm test`: **176/176 tests passing** (102 server tests including proxy security tests, 74 client tests).
-- `npm run build`: Vite production build passed in **371ms**.
-- Live Proxy Tests:
-  - SSRF targeting `127.0.0.1` rejected with `HTTP 403 Forbidden`.
-  - Unapproved external host `evil.com` rejected with `HTTP 403 Forbidden`.
-  - CORS preflight `OPTIONS` returned `HTTP 204` with `Access-Control-Allow-Origin: *`.
-  - Range request forwarding verified against upstream provider hosts with `HTTP 206/404` and preserved headers.
+- `npm test`: **182/182 tests passing** (108 server tests, 74 client tests).
+  - Proxy Range header forwarding (`Range: bytes=0-511`) verified with `HTTP 206 Partial Content`.
+  - Seeking offsets (`Range: bytes=500000-`) verified with `HTTP 206 Partial Content`.
+  - Abort handling verified: premature client socket close aborts upstream; normal finish does not.
+  - Token registry verified: associates protected headers and resolves URLs without leaking secrets.
+  - Redirect protection verified: redirects to cloud metadata `169.254.169.254` blocked with `HTTP 403 Forbidden`.
+  - Sample Clip fixture verified: Matroska AVC 360p with 2 AAC audio tracks remuxed to FastStart MP4 and cancellation verified.
+- `npm run build`: Vite production client build succeeded cleanly in **361ms**.
 
 
 ## Client-Side Playback Repair: Format Detection, Range MKV Pipeline & Audio Switching

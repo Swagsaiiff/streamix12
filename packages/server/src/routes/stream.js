@@ -2,11 +2,22 @@ import { Router } from "express";
 import { sendError } from "../errors.js";
 import { logger } from "../logger.js";
 import { ProviderError } from "../providers/base.js";
-import { proxyMediaRequest } from "./proxy.js";
+import { proxyMediaRequest, registerStreamToken } from "./proxy.js";
 
 const SESSION_ID_RE = /^[a-f0-9]{64}$/;
 const FILE_RE = /^[A-Za-z0-9._-]+$/;
 const inflightSessions = new Map();
+
+function sanitizeClientHeaders(headers = {}) {
+  const safe = {};
+  const sensitive = /^(cookie|set-cookie|authorization|proxy-authorization|x-amz-|token|secret)/i;
+  for (const [key, val] of Object.entries(headers)) {
+    if (!sensitive.test(key)) {
+      safe[key] = val;
+    }
+  }
+  return safe;
+}
 
 function validSessionId(value) {
   return typeof value === "string" && SESSION_ID_RE.test(value);
@@ -89,8 +100,16 @@ export function streamRouter({
         logger.info("stream.session_created", { sessionId: session.sessionId, status: session.status });
       }
 
+      const streamToken = registerStreamToken({
+        url: stream.sourceUrl,
+        headers: stream.headers ?? {},
+        provider: stream.provider?.name
+      });
+
       res.status(201).json({
         sessionId: session?.sessionId ?? null,
+        streamToken,
+        proxyUrl: `/api/stream/proxy?token=${streamToken}`,
         provider: stream.provider,
         resolution: stream.resolution,
         quality: stream.resolution?.quality ?? null,
@@ -106,7 +125,7 @@ export function streamRouter({
         mediaType: stream.mediaType,
         sourceUrl: stream.sourceUrl,
         variants: stream.variants ?? null,
-        headers: stream.headers ?? {},
+        headers: sanitizeClientHeaders(stream.headers ?? {}),
         note: stream.note ?? null,
         playlistUrl: session?.sessionId ? `/api/stream/${session.sessionId}/master.m3u8` : null
       });

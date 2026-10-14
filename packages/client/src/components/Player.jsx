@@ -228,20 +228,25 @@ export default function Player({ item, onClose, onProgress }) {
 
         // If direct fetch is blocked by CORS, use the secure backend media-proxy as transport layer
         if (probe.corsBlocked) {
-          const proxiedUrl = `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
+          const proxiedUrl = stream.proxyUrl || `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
+          let proxyProbe;
           try {
-            const proxyProbe = await probeMediaSource(proxiedUrl, {
+            proxyProbe = await probeMediaSource(proxiedUrl, {
               signal: controller.signal,
-              headers: stream.headers,
               declaredType: stream.mediaType || probe.format
             });
-            if (proxyProbe.isPlayable || (!proxyProbe.error && proxyProbe.format !== "unknown")) {
-              sourceUrl = proxiedUrl;
-              probe = proxyProbe;
-            }
-          } catch {
-            // Proxy request failed (e.g. backend server offline)
+          } catch (proxyErr) {
+            if (proxyErr.name === "AbortError") throw proxyErr;
+            throw new Error(`Media proxy connection failed: ${proxyErr.message}`);
           }
+
+          if (proxyProbe.error && !proxyProbe.isPlayable) {
+            // Preserve the proxy HTTP status and response message - do not swallow proxy failures
+            throw new Error(proxyProbe.error);
+          }
+
+          sourceUrl = proxiedUrl;
+          probe = proxyProbe;
         }
 
         if (probe.error && !probe.isPlayable && !probe.corsBlocked) {
