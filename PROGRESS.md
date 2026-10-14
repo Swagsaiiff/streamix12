@@ -40,8 +40,12 @@ Phase 4: Complete Removal of Runtime Backend Dependency from Production Playback
   - `tt31158589` ("Don't Come Home"): Rejects with `No browser-accessible stream source found`, displays browser-only explanation with Sample Clip shortcut.
 - **Unit & Pipeline Tests**:
   - `npm test`: **187/187 tests passing** (108 server tests, 79 client tests).
-- **Production Build**:
+- **Production Build & Preview Without Backend**:
   - `npm run build`: Vite bundled client in **343ms** with zero errors.
+  - `npm run preview`: Started Vite production preview server on `http://localhost:4173/`.
+  - Verified `GET http://localhost:4173/` returns `200 OK` (serves production bundle).
+  - Verified static fixtures (`/fixtures/multi-audio-test.mkv`) served with `200 OK` (3,160,642 bytes).
+  - Backend on port `4001` remains completely stopped; zero backend dependencies required for serving or playback.
 
 ## Production Browser-Only Playback Pipeline Integration
 

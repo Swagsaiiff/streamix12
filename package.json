@@ -14,6 +14,7 @@
     "dev:server": "npm run dev --workspace=packages/server",
     "dev:client": "npm run dev --workspace=packages/client",
     "build": "npm run build --workspace=packages/client",
+    "preview": "npm run preview --workspace=packages/client",
     "test": "npm run test --workspace=packages/server && node --test \"packages/client/src/lib/*.test.js\"",
     "test:client": "node --test \"packages/client/src/lib/*.test.js\"",
     "start": "npm run start --workspace=packages/server",
