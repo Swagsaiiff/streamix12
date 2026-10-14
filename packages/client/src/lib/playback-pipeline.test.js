@@ -113,3 +113,31 @@ test("progressKey preserves episode tracking without cross-title collision", () 
   assert.equal(ep2Key, "CineStream:series:tt13444408:s1e2");
   assert.notEqual(ep1Key, ep2Key);
 });
+
+test("getStreamResolutionPlan routes direct media with query strings to client resolution without backend", () => {
+  const plan = getStreamResolutionPlan({
+    streamUrl: "https://cdn.example.org/media/video?auth=secret123&session=abc"
+  });
+  assert.equal(plan.canResolveClientSide, true);
+  assert.equal(plan.format, "auto");
+  assert.equal(plan.requiresBackend, false);
+});
+
+test("getStreamResolutionPlan marks CineStream and VegaMovies as backend-required for stream resolution", () => {
+  const cinestreamPlan = getStreamResolutionPlan({
+    title: "Vincenzo",
+    provider: "CineStream",
+    sourceUrl: "https://v3-cinemeta.strem.io/meta/series/tt13433812.json"
+  });
+  assert.equal(cinestreamPlan.canResolveClientSide, false);
+  assert.equal(cinestreamPlan.requiresBackend, true);
+  assert.match(cinestreamPlan.reasons[0], /metadata-only/i);
+
+  const vegaPlan = getStreamResolutionPlan({
+    title: "Interstellar",
+    provider: "VegaMovies"
+  });
+  assert.equal(vegaPlan.canResolveClientSide, false);
+  assert.equal(vegaPlan.requiresBackend, true);
+  assert.match(vegaPlan.reasons[0], /Access-Control-Allow-Origin/i);
+});

@@ -157,22 +157,21 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                       Start over
                     </button>
                   )}
-                  {resolutionPlan.requiresBackend && (
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() =>
-                        onPlay?.({
-                          ...item,
-                          streamUrl: "/fixtures/multi-audio-test.mkv",
-                          provider: "Direct",
-                          mediaType: "mkv"
-                        })
-                      }
-                      title="Play browser-accessible dual-audio test media directly in the client player"
-                    >
-                      Play Sample Clip
-                    </button>
-                  )}
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() =>
+                      onPlay?.({
+                        ...item,
+                        title: `${title} (Sample Clip)`,
+                        streamUrl: "/fixtures/multi-audio-test.mkv",
+                        provider: "Direct",
+                        mediaType: "mkv"
+                      })
+                    }
+                    title="Play browser-accessible dual-audio test media directly in the client player (100% browser-only)"
+                  >
+                    Play Sample Clip
+                  </button>
                 </div>
               )}
             </div>

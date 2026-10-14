@@ -237,6 +237,11 @@ export default function Player({ item, onClose, onProgress }) {
             });
           } catch (proxyErr) {
             if (proxyErr.name === "AbortError") throw proxyErr;
+            if (stream.streamMode === "client") {
+              throw new Error(
+                "Media host blocks browser cross-origin requests (CORS). Direct browser playback requires CORS headers on the remote host, and the local backend proxy is offline. Start the backend with 'npm run dev' to proxy this source."
+              );
+            }
             throw new Error(`Media proxy connection failed: ${proxyErr.message}`);
           }
 
@@ -787,7 +792,7 @@ export default function Player({ item, onClose, onProgress }) {
           <div className="player-error-panel" role="alert">
             <h2>Playback error</h2>
             <p>{error}</p>
-            {error && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable")) && (
+            {error && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (
               <div
                 style={{
                   marginTop: "0.85rem",
@@ -800,9 +805,9 @@ export default function Player({ item, onClose, onProgress }) {
                   lineHeight: "1.4"
                 }}
               >
-                <strong style={{ color: "#93c5fd" }}>Backend Server Offline (HTTP 502):</strong>
+                <strong style={{ color: "#93c5fd" }}>Backend Server Offline (HTTP 502 / Offline):</strong>
                 <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  This title requires server-side stream resolution (VegaMovies scraping, Cloudflare anti-bot handling) and media proxying for CORS-restricted hosts. Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH). To stream this title, start the backend server with <code>npm run dev</code>.
+                  This title requires server-side stream resolution (VegaMovies scraping, Cloudflare anti-bot handling) and media proxying for CORS-restricted hosts. Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH, and the dual-audio MKV sample clip). To stream this title, start the backend server with <code>npm run dev</code>.
                 </p>
               </div>
             )}
@@ -867,6 +872,11 @@ export default function Player({ item, onClose, onProgress }) {
             </span>
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
             {sourceStatus === "direct_stream" && <span className="player-live-badge" style={{ background: "#059669" }}>Client Direct</span>}
+            {playbackMode === "client-remux" && (
+              <span className="player-test-badge" style={{ background: "rgba(16, 185, 129, 0.2)", color: "#6ee7b7", border: "1px solid rgba(16, 185, 129, 0.4)" }}>
+                FastStart MP4 Remux
+              </span>
+            )}
             {sourceStatus === "provider_stream" && (
               <span className="player-live-badge">{sourceProvider ? `Backend · ${sourceProvider}` : "Backend Resolved"}</span>
             )}

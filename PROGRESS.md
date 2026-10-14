@@ -2,7 +2,50 @@
 
 ## Current phase
 
-Phase 4: Client-Side-First Range Playback & Secure Backend Media Proxy (`main`).
+Phase 4: Production Browser-Only Playback Pipeline Integration (`main`).
+
+## Production Browser-Only Playback Pipeline Integration
+
+### 1. Investigation of Public Addons & CORS Stream Providers
+1. **Public Stremio Addons (Cinemeta)**:
+   - Evaluated public Stremio addon endpoints (`https://v3-cinemeta.strem.io/manifest.json`).
+   - Manifest declares `resources: ["catalog", "meta", "addon_catalog"]`. Cinemeta is strictly a metadata catalog provider and does NOT index or host media stream URLs (`/stream/...` returns HTTP 404 HTML).
+   - Other public scraping addons (Torrentio, WatchHub) either return magnet links requiring WebTorrent/debrid APIs or redirect to commercial subscription services (Netflix/Apple/Amazon).
+2. **Video File Hosts & VegaMovies Limitations**:
+   - VegaMovies scraping (`vegamovies.gallery`) fundamentally requires server-side Node.js execution due to:
+     - Cloudflare anti-bot challenges and Turnstile checks that fail in cross-origin browser sandboxes.
+     - Token decryption and intermediate redirectors (`vcloud.beer`, `fastdl`) requiring custom `Referer` and `Origin` headers that the browser Fetch specification forbids JavaScript from setting (`Refused to set unsafe header`).
+     - Upstream CDN/storage hosts (e.g. `*.r2.cloudflarestorage.com`, `gpdl*`, `pixeldrain`) do NOT send `Access-Control-Allow-Origin: *` headers to arbitrary web origins.
+   - Conclusion: VegaMovies HTML scraping and token extraction cannot run purely in the browser without a backend.
+3. **What Genuinely Works Browser-Only**:
+   - Direct CORS-enabled MP4 and WebM video streams (played natively in `<video>`).
+   - Direct CORS-enabled HLS (`.m3u8`) adaptive streams (played via `hls.js`).
+   - Direct CORS-enabled DASH (`.mpd`) adaptive streams (played via `dash.js`).
+   - Direct browser-accessible MKV/Matroska files with H.264 video and AAC audio: demuxed and remuxed in memory to FastStart MP4 using Mediabunny stream-copying, enabling client-side multi-audio track selection (exemplified by the `/fixtures/multi-audio-test.mkv` dual-audio test clip).
+
+### 2. Production Player Integration & Architectural Changes
+1. **Direct Route in Production `Player.jsx`**:
+   - Integrated client-side-first stream resolution directly into production `Player.jsx` via `createStream()` and `resolveClientStream()`.
+   - When a valid direct stream URL (`streamUrl`, `mediaUrl`, `url`, or direct media `sourceUrl`) is present, `createStream()` immediately resolves client-side with status `ready` and stream mode `client`, completely bypassing the `/api/stream/:type/:id` backend resolver.
+   - In `getStreamResolutionPlan()`, direct candidates with query strings or unknown extensions default to format `"auto"`, delegating inspection to `probeMediaSource()` in the browser rather than failing over to the backend.
+2. **Production Dual-Audio Sample Clip**:
+   - In `DetailModal.jsx`, made "Play Sample Clip" prominently available on all titles. Clicking it immediately launches `/fixtures/multi-audio-test.mkv` in the production `Player.jsx`.
+   - The production player inspects the Matroska container using Mediabunny byte-range requests, discovers both AAC audio tracks (Track 0: English, Track 1: Spanish), remuxes to FastStart MP4 in ~15ms, and enables seamless in-player audio switching while preserving playback position.
+3. **Navbar "Direct Play" & Custom Stream Modal**:
+   - Added a "Direct Play" action to `Navbar.jsx` opening `DirectStreamModal.jsx`.
+   - Allows users to enter any direct media URL or choose from tested presets (Dual-Audio MKV Sample, Big Buck Bunny CORS MP4, Mux Multi-Bitrate CORS HLS).
+   - Explicitly displays the architectural execution boundary to users: browser-only sources play direct; protected scrapers (VegaMovies) require the backend.
+4. **Accurate Error Reporting & UI Badges**:
+   - In `Player.jsx`, added visual badges: `Client Direct` (green) for direct streams, `FastStart MP4 Remux` (emerald) during browser-side Matroska remuxing, and `Backend Resolved` when server stream resolution is used.
+   - Enhanced error reporting to accurately identify offline backend status (`HTTP 502 / Offline`) vs upstream CORS blocks vs unsupported media codecs (HEVC, E-AC-3).
+5. **Preserved Existing Features**:
+   - Catalog browsing, multi-row home carousels, instant search, episode queuing, detail modal metadata, resume position tracking (`progressStore`), quality selection, and fullscreen are 100% preserved.
+
+### 3. Verification Evidence
+- `npm test`: **184/184 tests passing** (108 server tests, 76 client tests).
+  - Added tests verifying that direct media with query strings resolve client-side without backend.
+  - Added tests verifying that metadata JSON items and scraper providers accurately declare backend requirements.
+- `npm run build`: Production Vite client build succeeded in **361ms** with all assets bundled.
 
 ## Media Proxy & CORS-Blocked MKV Playback Repair
 

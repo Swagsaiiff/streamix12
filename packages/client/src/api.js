@@ -121,7 +121,7 @@ export async function fetchDetail(type, id, { provider, ...options } = {}) {
 
 import { resolveClientStream } from "./lib/client-provider.js";
 
-export function createStream(type, id, { lang, provider, season, episode, sourceUrl, mediaType, ...options } = {}) {
+export function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, ...options } = {}) {
   const directResolved = resolveClientStream(
     {
       type,

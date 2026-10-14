@@ -6,6 +6,7 @@ import Row from "./components/Row.jsx";
 import Grid from "./components/Grid.jsx";
 import SkeletonRow from "./components/SkeletonRow.jsx";
 import DetailModal from "./components/DetailModal.jsx";
+import DirectStreamModal from "./components/DirectStreamModal.jsx";
 import Player from "./components/Player.jsx";
 import ContinueWatching from "./components/ContinueWatching.jsx";
 import { progressStore } from "./lib/progress.js";
@@ -20,6 +21,7 @@ export default function App() {
   const [searchResult, setSearchResult] = useState(null);
   const [searchState, setSearchState] = useState("idle");
   const [modal, setModal] = useState(null);
+  const [directStreamOpen, setDirectStreamOpen] = useState(false);
   const [player, setPlayer] = useState(null);
   const [continueEntries, setContinueEntries] = useState([]);
   const detailCacheRef = useRef(new Map());
@@ -234,6 +236,7 @@ export default function App() {
         onNavigate={handleNavigate}
         onSearch={handleSearch}
         searchState={searchState}
+        onDirectStream={() => setDirectStreamOpen(true)}
       />
 
       {searchState !== "idle" && view === "search" ? (
@@ -324,6 +327,12 @@ export default function App() {
           }}
           resumeInfo={resumeFor({ ...modal.item, season: null, episode: null })}
           suppressEscape={Boolean(player)}
+        />
+      )}
+      {directStreamOpen && (
+        <DirectStreamModal
+          onClose={() => setDirectStreamOpen(false)}
+          onPlay={openPlayer}
         />
       )}
       {player && <Player item={player} onClose={closePlayer} onProgress={refreshProgress} />}

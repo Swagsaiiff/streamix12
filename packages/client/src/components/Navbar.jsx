@@ -1,6 +1,6 @@
 import SearchBox from "./SearchBox.jsx";
 
-export default function Navbar({ view, onNavigate, onSearch, searchState }) {
+export default function Navbar({ view, onNavigate, onSearch, searchState, onDirectStream }) {
   return (
     <header className="navbar">
       <button className="brand-btn" onClick={() => onNavigate("home")}>
@@ -16,6 +16,11 @@ export default function Navbar({ view, onNavigate, onSearch, searchState }) {
         <button className={view === "series" ? "nav-link active" : "nav-link"} onClick={() => onNavigate("series")}>
           Series
         </button>
+        {onDirectStream && (
+          <button className="nav-link" onClick={onDirectStream} title="Play direct stream or sample clip directly in browser">
+            Direct Play
+          </button>
+        )}
       </nav>
       <SearchBox onSearch={onSearch} disabled={searchState === "loading"} />
     </header>

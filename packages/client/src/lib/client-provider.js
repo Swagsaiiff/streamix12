@@ -75,8 +75,8 @@ export function getStreamResolutionPlan(item) {
 
   if (directCandidate) {
     const detected = detectFormatFromUrl(directCandidate);
-    const format = detected !== "unknown" ? detected : (item.mediaType || null);
-    if (format && format !== "json" && format !== "html" && format !== "unknown") {
+    const format = detected !== "unknown" ? detected : (item.mediaType || "auto");
+    if (format !== "json" && format !== "html") {
       return {
         canResolveClientSide: true,
         sourceUrl: directCandidate,
@@ -106,7 +106,7 @@ export function resolveClientStream(item = {}, options = {}) {
     return null;
   }
 
-  const mediaType = item.mediaType || options.mediaType || plan.format;
+  const mediaType = item.mediaType || options.mediaType || (plan.format !== "auto" ? plan.format : null);
   return {
     sessionId: null,
     provider: { name: plan.provider, resolution: "direct_stream" },
