@@ -58,41 +58,48 @@ export function streamRouter({
         logger.warn("stream.fixture_fallback", { type, id, provider: providerName });
       }
 
-      const dedupeKey = `${stream.provider.name}:${type}:${id}:${season ?? ""}:${episode ?? ""}:${preferredLanguage ?? ""}:${stream.sourceUrl}`;
-      let sessionPromise = inflightSessions.get(dedupeKey);
-      if (!sessionPromise) {
-        sessionPromise = streamManager
-          .createSession(stream.sourceUrl, {
-            preferredLanguage,
-            maxSeconds: sessionMaxSeconds,
-            headers: stream.headers ?? {},
-            variants: stream.variants ?? null
-          })
-          .finally(() => inflightSessions.delete(dedupeKey));
-        inflightSessions.set(dedupeKey, sessionPromise);
-      } else {
-        logger.info("stream.session_deduped", { type, id, provider: providerName });
+      const useBackendSession = req.query.legacyBackend === "1" || req.query.legacyBackend === "true";
+      let session = null;
+      if (useBackendSession) {
+        const dedupeKey = `${stream.provider.name}:${type}:${id}:${season ?? ""}:${episode ?? ""}:${preferredLanguage ?? ""}:${stream.sourceUrl}`;
+        let sessionPromise = inflightSessions.get(dedupeKey);
+        if (!sessionPromise) {
+          sessionPromise = streamManager
+            .createSession(stream.sourceUrl, {
+              preferredLanguage,
+              maxSeconds: sessionMaxSeconds,
+              headers: stream.headers ?? {},
+              variants: stream.variants ?? null
+            })
+            .finally(() => inflightSessions.delete(dedupeKey));
+          inflightSessions.set(dedupeKey, sessionPromise);
+        } else {
+          logger.info("stream.session_deduped", { type, id, provider: providerName });
+        }
+        session = await sessionPromise;
+        logger.info("stream.session_created", { sessionId: session.sessionId, status: session.status });
       }
-      const session = await sessionPromise;
-      logger.info("stream.session_created", { sessionId: session.sessionId, status: session.status });
 
       res.status(201).json({
-        sessionId: session.sessionId,
+        sessionId: session?.sessionId ?? null,
         provider: stream.provider,
         resolution: stream.resolution,
         quality: stream.resolution?.quality ?? null,
         qualities: Array.isArray(stream.variants) ? stream.variants.map((variant) => `${variant.height}p`) : null,
-        status: session.status,
-        streamMode: session.mode,
-        streamModeReason: session.streamMode?.reason ?? null,
-        audioTracks: session.audioTracks,
-        preferredLanguage: session.audioTracks.find((t) => t.default)?.language ?? null,
+        status: session?.status ?? "ready",
+        streamMode: session?.mode ?? "client",
+        streamModeReason: session?.streamMode?.reason ?? "client_side_playback",
+        audioTracks: session?.audioTracks ?? [],
+        preferredLanguage: session?.audioTracks?.find((t) => t.default)?.language ?? preferredLanguage ?? null,
         title: stream.title,
         year: stream.year,
         episode: stream.episode ?? null,
         mediaType: stream.mediaType,
+        sourceUrl: stream.sourceUrl,
+        variants: stream.variants ?? null,
+        headers: stream.headers ?? {},
         note: stream.note ?? null,
-        playlistUrl: `/api/stream/${session.sessionId}/master.m3u8`
+        playlistUrl: session?.sessionId ? `/api/stream/${session.sessionId}/master.m3u8` : null
       });
     } catch (err) {
       if (err instanceof ProviderError) {

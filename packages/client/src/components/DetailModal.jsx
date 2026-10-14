@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getStreamResolutionPlan } from "../lib/client-provider.js";
 
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -91,6 +92,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
   const isSeries = (detail?.type ?? item.type) === "series";
   const activeSeason = seasons.find((s) => s.season === selectedSeason) ?? null;
   const episodeCount = detail?.episodes?.length ?? 0;
+  const resolutionPlan = useMemo(() => getStreamResolutionPlan(detail || item), [detail, item]);
 
   return (
     <div
@@ -127,6 +129,11 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                 {rating && <span className="badge badge-rating">★ {rating}</span>}
                 {runtime && <span className="badge">{runtime}</span>}
                 {isSeries && episodeCount > 0 && <span className="badge">{episodeCount} episodes</span>}
+                {resolutionPlan.canResolveClientSide ? (
+                  <span className="badge badge-client" title="Direct browser stream: plays without backend server">Browser Direct</span>
+                ) : (
+                  <span className="badge badge-backend" title={`Requires backend server for protected provider scraping (${resolutionPlan.provider})`}>Backend Required</span>
+                )}
                 {genres?.slice(0, 3).map((genre) => (
                   <span className="badge badge-genre" key={genre}>
                     {genre}
@@ -148,6 +155,22 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                       onClick={() => onPlay?.({ ...item, restart: true })}
                     >
                       Start over
+                    </button>
+                  )}
+                  {resolutionPlan.requiresBackend && (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() =>
+                        onPlay?.({
+                          ...item,
+                          streamUrl: "/fixtures/multi-audio-test.mkv",
+                          provider: "Direct",
+                          mediaType: "mkv"
+                        })
+                      }
+                      title="Play browser-accessible dual-audio test media directly in the client player"
+                    >
+                      Play Sample Clip
                     </button>
                   )}
                 </div>

@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dashjs": "^5.2.1",
     "hls.js": "^1.7.3",
+    "libav.js": "^6.10.9",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

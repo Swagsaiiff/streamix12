@@ -438,6 +438,7 @@ body {
   0% {
     background-position: 200% 0;
   }
+
   100% {
     background-position: -200% 0;
   }
@@ -490,6 +491,7 @@ body {
   from {
     opacity: 0;
   }
+
   to {
     opacity: 1;
   }
@@ -513,6 +515,7 @@ body {
     transform: translateY(20px);
     opacity: 0;
   }
+
   to {
     transform: translateY(0);
     opacity: 1;
@@ -936,14 +939,12 @@ body {
   width: 100%;
   height: 5px;
   border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    #e50914 0%,
-    #e50914 var(--played, 0%),
-    rgba(229, 231, 235, 0.35) var(--played, 0%),
-    rgba(229, 231, 235, 0.35) var(--buffered, 0%),
-    rgba(229, 231, 235, 0.15) var(--buffered, 0%)
-  );
+  background: linear-gradient(to right,
+      #e50914 0%,
+      #e50914 var(--played, 0%),
+      rgba(229, 231, 235, 0.35) var(--played, 0%),
+      rgba(229, 231, 235, 0.35) var(--buffered, 0%),
+      rgba(229, 231, 235, 0.15) var(--buffered, 0%));
   cursor: pointer;
   outline: none;
 }
@@ -1331,6 +1332,7 @@ body {
     opacity: 0;
     transform: translateY(14px) scale(0.99);
   }
+
   to {
     opacity: 1;
     transform: none;
@@ -1432,6 +1434,18 @@ body {
   background: rgba(229, 9, 20, 0.16);
   border-color: rgba(229, 9, 20, 0.4);
   color: #ff8a8f;
+}
+
+.badge-client {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #6ee7b7;
+}
+
+.badge-backend {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #93c5fd;
 }
 
 .modal-actions {

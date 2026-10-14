@@ -1,22 +1,89 @@
+import {
+  fetchDirectHomeSections,
+  directSearch,
+  directGetDetails
+} from "./lib/direct-catalog.js";
+
 const HOME_ROWS = ["trending", "popular-movies", "new-releases", "top-rated", "action", "comedy", "horror", "popular-series", "action-series", "anime-airing", "anime-trending"];
 
-async function request(path, options = {}) {
-  const res = await fetch(path, options);
-  const body = await res.json();
-  if (!res.ok) {
-    throw new Error(body.message || `Request failed with status ${res.status}`);
+async function safeParseResponse(res) {
+  const contentType = res.headers?.get?.("content-type") || "";
+  let text = "";
+  try {
+    text = await res.text();
+  } catch {
+    text = "";
   }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { data: null, text: "", contentType };
+  }
+  if (contentType.includes("application/json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return { data: JSON.parse(trimmed), text: trimmed, contentType };
+    } catch {
+      return { data: null, text: trimmed, contentType };
+    }
+  }
+  return { data: null, text: trimmed, contentType };
+}
+
+export async function request(path, options = {}) {
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    throw new Error(`Network error connecting to ${path}: ${err.message}`);
+  }
+
+  const { data: body, text, contentType } = await safeParseResponse(res);
+
+  if (!res.ok) {
+    let errorMsg = body?.message || body?.error;
+    if (!errorMsg) {
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        errorMsg = `Backend server is unreachable or offline (HTTP ${res.status}). CineStream stream resolution requires the backend server to bridge and scrape provider links. Start the backend with 'npm run dev'.`;
+      } else if (text && text.length <= 200 && !contentType.includes("html") && !text.startsWith("<")) {
+        errorMsg = text;
+      } else {
+        errorMsg = `Request failed with status ${res.status}${res.statusText ? ` (${res.statusText})` : ""}`;
+      }
+    }
+    const err = new Error(errorMsg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+
+  if (body === null) {
+    if (res.status === 204 || !text) {
+      return {};
+    }
+    throw new Error(`Expected JSON from ${path}, received ${res.headers.get("content-type") || "non-JSON content"}`);
+  }
+
   return body;
 }
 
-export async function fetchHomeSections() {
+export async function fetchHomeSections(options = {}) {
   try {
-    const data = await request("/api/home");
+    const data = await request("/api/home", options);
     return data.rows.map((row) => ({ key: row.key, data: row }));
   } catch {
+    // If backend is not running or returns an error, load directly from Stremio Cinemeta / Kitsu APIs
+    try {
+      const directRows = await fetchDirectHomeSections(options);
+      if (directRows && directRows.length > 0) {
+        return directRows;
+      }
+    } catch {
+      // Continue to per-row fallback
+    }
+
     const results = await Promise.allSettled(
       HOME_ROWS.map((key) =>
-        request(`/api/home/${key}`).then((data) => {
+        request(`/api/home/${key}`, options).then((data) => {
           const row = Array.isArray(data.rows) ? data.rows[0] : data;
           return { key, data: { ...row, key } };
         })
@@ -27,16 +94,53 @@ export async function fetchHomeSections() {
   }
 }
 
-export function fetchSearch(q, options = {}) {
-  return request(`/api/search?q=${encodeURIComponent(q)}`, options);
+export async function fetchSearch(q, options = {}) {
+  try {
+    return await request(`/api/search?q=${encodeURIComponent(q)}`, options);
+  } catch {
+    // Direct search fallback
+    const items = await directSearch(q, options);
+    return {
+      query: q,
+      count: items.length,
+      items
+    };
+  }
 }
 
-export function fetchDetail(type, id, { provider, ...options } = {}) {
+export async function fetchDetail(type, id, { provider, ...options } = {}) {
   const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
-  return request(`/api/detail/${type}/${encodeURIComponent(id)}${query}`, options);
+  try {
+    return await request(`/api/detail/${type}/${encodeURIComponent(id)}${query}`, options);
+  } catch {
+    // Direct detail fallback
+    const item = await directGetDetails(type, id, options);
+    return { item };
+  }
 }
 
-export function createStream(type, id, { lang, provider, season, episode, ...options } = {}) {
+import { resolveClientStream } from "./lib/client-provider.js";
+
+export function createStream(type, id, { lang, provider, season, episode, sourceUrl, mediaType, ...options } = {}) {
+  const directResolved = resolveClientStream(
+    {
+      type,
+      id,
+      provider,
+      season,
+      episode,
+      sourceUrl: sourceUrl || options.sourceUrl,
+      streamUrl: options.streamUrl,
+      mediaType,
+      ...options
+    },
+    { mediaType }
+  );
+
+  if (directResolved) {
+    return Promise.resolve(directResolved);
+  }
+
   const base = `/api/stream/${type}/${encodeURIComponent(id)}`;
   const params = new URLSearchParams();
   if (lang) params.set("lang", lang);

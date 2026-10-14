@@ -15,10 +15,29 @@ export function isPlaceholderMedia(url) {
   return PLACEHOLDER_PATTERN.test(url);
 }
 
+export function detectMediaType(url, contentType = null) {
+  const str = String(url ?? "");
+  const ct = String(contentType ?? "").toLowerCase();
+  if (ct.includes("application/vnd.apple.mpegurl") || ct.includes("application/x-mpegurl") || /\.m3u8(\?|$)/i.test(str)) {
+    return "hls";
+  }
+  if (ct.includes("video/mp4") || /\.mp4(\?|$)/i.test(str)) {
+    return "mp4";
+  }
+  if (ct.includes("video/webm") || /\.webm(\?|$)/i.test(str)) {
+    return "webm";
+  }
+  if (ct.includes("video/x-matroska") || /\.mkv(\?|$)/i.test(str)) {
+    return "mkv";
+  }
+  return "mkv";
+}
+
 export function candidateRank(url) {
-  if (/\.(mkv|mp4)(\?|$)/i.test(url)) return 0;
-  if (/\.m3u8(\?|$)/i.test(url)) return 1;
-  if (/\.webm(\?|$)/i.test(url)) return 2;
+  const type = detectMediaType(url);
+  if (type === "mp4" || type === "mkv") return 0;
+  if (type === "hls") return 1;
+  if (type === "webm") return 2;
   return 3;
 }
 
@@ -694,7 +713,7 @@ export class VegaMoviesProvider extends BaseProvider {
           url: chosen.url,
           variants: valid.slice(0, 3),
           headers: { Referer: `${base}/` },
-          mediaType: chosen.url.includes(".m3u8") ? "hls" : "mkv",
+          mediaType: detectMediaType(chosen.url),
           sourceType: "provider",
           episode: episodeFromUrl(chosen.url) ?? { season: Number(season), episode: Number(episode) },
           quality: `${chosen.height}p`,
@@ -818,13 +837,13 @@ export class VegaMoviesProvider extends BaseProvider {
       ).catch(() => false);
       logger.info("vega.ffprobe_check", { host: hostOf(candidate), playable, url: redactUrl(candidate) });
       if (playable) {
-        logger.info("vega.media_validated", { host: hostOf(candidate), mediaType: candidate.includes(".m3u8") ? "hls" : "mkv" });
+        logger.info("vega.media_validated", { host: hostOf(candidate), mediaType: detectMediaType(candidate) });
         const height = bestVariants.find((v) => v.url === candidate)?.height ?? null;
         return {
           url: candidate,
           variants: bestVariants.length > 1 ? bestVariants.slice(0, 3) : undefined,
           headers: { Referer: `${base}/` },
-          mediaType: candidate.includes(".m3u8") ? "hls" : "mkv",
+          mediaType: detectMediaType(candidate),
           sourceType: "provider",
           episode: episodeFromUrl(candidate),
           quality: height ? `${height}p` : null,

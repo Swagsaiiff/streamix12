@@ -2,7 +2,179 @@
 
 ## Current phase
 
-Post-Phase-5 restoration: CSX catalog/search/poster repair and playback honesty (requested repair work).
+CineStream Playback Flow & Scraper Boundary Analysis (`feature/cinestream-playback-flow`).
+
+## CineStream Stream Resolution & Playback Flow Analysis
+
+### 1. Current Playback Flow Trace
+1. **Catalog & Details**:
+   - The user selects a title from the CineStream catalog (e.g. Vincenzo, Interstellar, or any movie/series row).
+   - The item is populated by `packages/client/src/lib/direct-catalog.js` from Stremio Cinemeta (`https://v3-cinemeta.strem.io/meta/<type>/<id>.json`) or Kitsu.
+   - The item metadata includes `source: "CineStream"`, `provider: "CineStream"`, and `sourceUrl` pointing to the Cinemeta metadata `.json`.
+2. **Player Mounting & Direct Source Detection**:
+   - `Player.jsx` mounts and checks whether the item has a direct media stream URL via `resolveClientStream()`.
+   - Because `sourceUrl` is a metadata JSON endpoint (`.json`), `resolveClientStream()` correctly identifies that this is not a direct media stream.
+3. **Backend Resolution Invocation & HTTP 502**:
+   - `createStream()` falls back to `POST /api/stream/:type/:id` through the Vite proxy (`/api` -> `http://localhost:4001`).
+   - When the backend is offline, Vite's proxy fails with `ECONNREFUSED` and returns `HTTP 502 Bad Gateway`.
+4. **Backend Scraper Bridge**:
+   - On the backend, `CineStreamProvider` has `supportsStreamResolution: false` (Cinemeta only indexes metadata, not video streams).
+   - In `packages/server/src/providers/extractor.js` (lines 125–145), the server automatically bridges CineStream titles by title and year to `VegaMoviesProvider.resolveByTitle(...)`.
+   - `VegaMoviesProvider` searches `vegamovies.gallery`, follows redirectors (`vcloud.beer`, FastDL), parses tokens, and resolves the final direct download/stream link (Cloudflare R2 `.mkv` or `.mp4`).
+
+### 2. What Genuinely Runs in the Browser vs. Exact Limitations
+- **What Genuinely Runs in the Browser**:
+  1. **Catalog, Search & Details**: 100% client-side via public CORS-enabled Stremio Cinemeta and Kitsu endpoints (`Access-Control-Allow-Origin: *`).
+  2. **Direct Media Playback**: When given a direct media URL (MP4, WebM, HLS `.m3u8`, DASH `.mpd`), the player plays directly using native `<video>` or `hls.js` without backend FFmpeg, transmuxing sessions, or stream manager calls.
+  3. **WASM MKV Demuxing**: Client-side Matroska inspection and remuxing via `libav.js` (`mkv-inspect.js` + `client-remux.js`) for browser-supported codecs.
+- **Exact Scraper Limitations in the Browser**:
+  1. **Cross-Origin Restrictions (CORS)**: `vegamovies.gallery`, `vcloud.beer`, and related file hosts do not set `Access-Control-Allow-Origin: *`. Browser `fetch()` calls fail immediately with CORS violations.
+  2. **Forbidden Request Headers**: VegaMovies and token redirectors require custom `Referer: https://vegamovies.gallery/` and session cookies. The W3C Fetch standard forbids browser client-side JavaScript from setting `Referer`, `Origin`, or `Cookie` headers.
+  3. **Cloudflare Bot Protection**: Cloudflare anti-bot challenges cannot be solved inside a cross-origin browser sandbox.
+- **Smallest Viable Solution**:
+  - Keep direct media sources playing 100% client-side without touching the backend or FFmpeg.
+  - For CineStream scraper-dependent titles, keep the lightweight backend scraper bridge (`vegamovies.js`) strictly for resolving the direct media URL, while keeping active playback client-side in `Player.jsx` without backend FFmpeg transmuxing.
+  - Distinguish client-direct from backend-dependent sources in the UI, and report the offline backend limitation honestly with clear guidance when the server is stopped.
+
+### 3. Code Modifications & Integrity
+- Maintained strict provider boundaries: CineStream (Cinemeta / Kitsu) and VegaMovies only; no new providers introduced.
+- `packages/client/src/components/Player.jsx`:
+  - Disconnected residual backend session logic: removed `sessionRef`, removed `cleanupStream(sessionRef.current)` on unmount, and removed `master.m3u8` session fallback.
+  - Active player consumes `stream.sourceUrl` directly without creating or relying on a backend stream session.
+- `packages/client/src/components/DetailModal.jsx`:
+  - Added `Play Sample Clip` action for scraper-dependent titles: enables direct browser playback of the real multi-audio test fixture (`/fixtures/multi-audio-test.mkv`) directly in the client player with the backend stopped.
+- `packages/client/src/lib/client-provider.js`: Documented CineStream's exact backend scraper requirements in `backendReasons` and updated capability tests.
+- `packages/client/src/api.js`: Reused existing `resolveClientStream` to bypass `/api/stream` whenever a direct media URL is available.
+- Legacy backend playback code preserved disconnected in `packages/server/src/routes/stream.js`.
+
+### 4. Verification Evidence
+- `npm test`: **159/159 tests pass** (97 server tests, 62 client library tests).
+- `npm run build`: Vite production build succeeded cleanly in 355ms.
+- Verified fixture playback: `curl.exe -i --range 0-100 http://localhost:5173/fixtures/multi-audio-test.mkv` returns `HTTP 206 Partial Content` with valid Matroska EBML headers.
+
+
+
+## Playback Error Fix: Media Error 4 Format Error
+
+### Root Cause Analysis
+- **Error Observed**: `Media error 4: MEDIA_ELEMENT_ERROR: Format error` on direct stream sources.
+- **Root Cause 1 (Metadata URL Passed as Video Stream)**:
+  - Catalog items normalized from CineStream/Cinemeta contain `sourceUrl: "https://v3-cinemeta.strem.io/meta/<type>/<id>.json"`.
+  - When the user clicked play, `playItem.sourceUrl` was passed to `createStream` as a candidate direct source.
+  - `createStream` defaulted `mediaType: "mp4"`, returning the metadata JSON URL as a direct stream.
+  - The native `<video>` element was fed `https://v3-cinemeta.strem.io/meta/...json` with `video.src`. Chromium / Edge attempted to parse JSON text as an MP4 container, failed to find the `ftyp` box, and threw `Media error 4: MEDIA_ELEMENT_ERROR: Format error`.
+- **Root Cause 2 (MKV Container Fed to Native `<video>`)**:
+  - Desktop browsers (Chrome, Edge, Firefox, Safari) do not natively support Matroska (`.mkv`) containers in HTML5 `<video>`.
+  - When raw MKV URLs or MKV blobs were loaded into `video.src`, the browser demuxer failed (`DEMUXER_ERROR_COULD_NOT_OPEN`), firing HTMLMediaElement error code 4 (`MEDIA_ERR_SRC_NOT_SUPPORTED`).
+- **Root Cause 3 (Unchecked Unsupported Codecs HEVC / E-AC-3)**:
+  - `browserSupportFor` in `mkv-inspect.js` previously returned `verdict: "remux-needed"` for HEVC and E-AC-3 without verifying if the browser can actually decode them.
+  - Browsers without hardware HEVC decoders or E-AC-3 audio decoders failed on playback with format errors.
+- **Root Cause 4 (Missing DASH routing)**:
+  - Sources with `.mpd` were treated as direct native video instead of utilizing a dedicated DASH player.
+
+### Fixes Applied
+1. **Source Inspection & Format Probing (`packages/client/src/lib/source-detector.js`)**:
+   - Implemented `detectFormatFromUrl`, `detectFormatFromBytes`, and `probeMediaSource`.
+   - Inspects response status, Content-Type, and magic bytes (`0x1A 0x45 0xDF 0xA3` for EBML MKV/WebM, `ftyp` for MP4, `#EXTM3U` for HLS, `<MPD` for DASH, `<!DOCTYPE` for HTML, `{` for JSON).
+   - Honestly flags 403 Forbidden / expired URLs, 404 Not Found, and HTML web pages.
+2. **Catalog Metadata Protection (`packages/client/src/api.js` & `packages/client/src/components/Player.jsx`)**:
+   - `Player.jsx` and `createStream` verify direct streams using `detectFormatFromUrl`. Metadata JSON endpoints (`.json` or `/meta/`) and HTML URLs are never treated as direct video streams.
+3. **Multi-Format Player Routing in `Player.jsx`**:
+   - **HLS (`.m3u8`)**: Routed to `hls.js`.
+   - **DASH (`.mpd`)**: Routed to `dash.js` via dynamic import.
+   - **Direct MP4 / WebM**: Routed to native `<video>` after checking `video.canPlayType`.
+   - **MKV**: Inspected client-side; if CORS is blocked by the host, reports clearly that the browser cannot demux MKV natively without server-side HLS.
+4. **Honest Capability Checks (`packages/client/src/poc/mkv-inspect.js`)**:
+   - HEVC / H.265 is verified via `canPlayType`; if unsupported, clearly marked as unsupported.
+   - E-AC-3 / Dolby Audio tracks without compatible audio decoders are marked unsupported. Never fakes playback.
+
+### Verification Evidence
+- `npm test` → **152/152 tests passing** (97 server tests, 55 client tests including `source-detector.test.js`).
+- `npm run build` → Vite production build clean in 339ms (with chunked `dash.all.min.js`).
+- Verified probe tests for 403 Forbidden, HTML error pages, and JSON endpoints.
+
+
+## Playback Error Fix: Unexpected End of JSON Input
+
+### Root Cause Analysis
+- **Failing Request**: `POST /api/stream/series/tt13433812?season=1&episode=1` (or `tt13433802`).
+- **Trigger**: When running in frontend-only / backend-free mode (`run only frontend`), the Node.js backend server (`packages/server` on port 4001) is offline.
+- **Proxy Behavior**: Vite dev server proxies `/api` requests to `http://localhost:4001`. Because the backend server is down, Vite returns `HTTP/1.1 502 Bad Gateway`, `Content-Type: text/plain`, with an empty body (0 bytes).
+- **Client Bug**: `packages/client/src/api.js` blindly called `const body = await res.json()` before checking `res.ok`, HTTP status, or content type. On an empty 502 response (or any non-JSON/empty response), `Response.json()` throws `SyntaxError: Failed to execute 'json' on 'Response': Unexpected end of JSON input`.
+- **UI Impact**: The player caught this raw SyntaxError and displayed `Playback failed: Failed to execute 'json' on 'Response': Unexpected end of JSON input` instead of an informative error indicating that the backend server is required for scraping provider stream links.
+
+### Fixes Applied
+1. **Safe Response Parsing (`packages/client/src/api.js`)**:
+   - Implemented `safeParseResponse(res)` which extracts text first, checks Content-Type and leading JSON delimiters (`{` or `[`), and parses safely without crashing on empty bodies.
+   - For non-OK responses (e.g. 502 Bad Gateway), produces a clear error: `Backend server is unreachable or offline (HTTP 502). Provider stream resolution requires the backend server.`
+   - Avoids treating raw HTML markup as user-facing error text.
+2. **Backend-Free Direct Playback Support (`packages/client/src/api.js` & `packages/client/src/components/Player.jsx`)**:
+   - `createStream` detects `sourceUrl` / `streamUrl` on direct items and immediately returns the expected stream data contract (`status: "ready"`, `streamMode: "client"`, `mediaType`, `sourceUrl`, `audioTracks: []`) without calling the backend.
+   - `Player.jsx` passes `sourceUrl` and `mediaType` through to `createStream`.
+3. **Safe JSON Parsing in Direct Catalog (`packages/client/src/lib/direct-catalog.js`)**:
+   - `fetchJson` updated to read `res.text()` first, returning `{}` on empty bodies and throwing clear errors on malformed payloads rather than uncaught syntax errors.
+4. **Vincenzo Episode Test Results**:
+   - **Offline Backend**: Request against `http://localhost:5173/api/stream/series/tt13433812?season=1&episode=1` safely throws `Error: Backend server is unreachable or offline (HTTP 502). Provider stream resolution requires the backend server.` (HTTP 502, `Unexpected end of JSON input` = false).
+   - **Online Backend**: When backend is running, `POST /api/stream/series/tt13433812?season=1&episode=1` returns `HTTP 201 Created` with `status: "ready"`, `streamMode: "client"`, `mediaType: "mkv"`, `sourceUrl` (Cloudflare R2 validated 1080p stream from VegaMovies), and 3 variant tiers (1080p, 720p, 480p).
+
+### Verification Evidence
+- `npm test` → **146/146 tests passing** (97 server tests, 49 client tests including `api.test.js`).
+- `npm run build` → Vite production build clean in 272ms.
+- Verified `curl.exe -i -X POST http://localhost:5173/api/stream/series/tt13433812?season=1&episode=1` returns HTTP 201 Created with complete JSON payload when backend is running.
+- Verified safe error message handling without unhandled syntax error when backend is offline.
+
+
+## Client-Side Playback Architecture Integration (Active Player)
+
+### Summary of Changes
+1. **Accurate Source-Type Detection**:
+   - Updated `packages/server/src/providers/vegamovies.js` with `detectMediaType(url, contentType)`.
+   - Distinguishes MP4 (`video/mp4`, `.mp4`), WebM (`video/webm`, `.webm`), HLS (`.m3u8`, `application/vnd.apple.mpegurl`), and Matroska/MKV (`video/x-matroska`, `.mkv`) using reliable URL patterns and headers rather than assuming all non-HLS streams are MKV.
+2. **Preserved & Disconnected Legacy Backend Playback**:
+   - In `packages/server/src/routes/stream.js`, `POST /api/stream/:type/:id` now resolves and returns the direct stream details (`sourceUrl`, `mediaType`, `headers`, `variants`, `quality`, `resolution`) directly to the client.
+   - The legacy backend FFmpeg HLS session creation (`streamManager.createSession()`) remains fully preserved in the backend code and is safely bypassed by default (executable if `?legacyBackend=1` is provided).
+3. **Active Client-Side Playback Engine in Player.jsx**:
+   - Integrated native HTML5 playback for direct MP4 and WebM sources.
+   - Integrated `hls.js` for HLS (`.m3u8`) sources.
+   - Integrated client-side WASM demux/remux (`mkv-inspect.js` + `client-remux.js` with `libav.js`) for MKV sources.
+   - Dual-audio track switching implemented with playback position preservation and mutex lock (`switchingLockRef`) to avoid overlapping jobs.
+   - Memory management: blob object URLs revoked on track change and unmount.
+4. **Website & UI Integrity**:
+   - Preserved all 11 homepage rows, search grid, details modal, episode selectors, and Continue Watching.
+
+### Verification Evidence
+- `npm test` → **137/137 pass** (97 server tests, 40 client library tests).
+- `npm run build` → Vite production build successful (38 modules transformed, WASM assets bundled).
+- Direct media format detection verified for mp4, webm, hls, and mkv.
+
+
+## Client-Side MKV Playback & Dual-Audio PoC (Isolated Route)
+
+### Summary & Architecture
+- Created isolated experimental route at `/poc/client-playback` dedicated exclusively to verifying in-browser playback and dual-audio processing without calling backend FFmpeg, transcoding, or HLS endpoints.
+- **Header Inspection:** Implemented pure JS EBML/Matroska parser (`mkv-inspect.js`) capable of extracting container type, duration, video codec/resolution, and full audio track list directly from the file bytes in the browser.
+- **Client-Side Remux & Processing:** Integrated `libav.js/default-cli` WebAssembly engine (`client-remux.js`) configured with the CLI WASM core (`/libav/libav-default-cli.wasm`). Supports:
+  1. Stream copy remuxing (`-c copy -f matroska`) to isolate any selected audio track in ~15ms with zero re-encoding.
+  2. WASM audio transcoding (`-c:v copy -c:a libopus`) for codecs not natively supported by the browser.
+  3. Automatic timestamp preservation across track switching (`timeBefore` -> `timeAfter`, preserving playback position).
+  4. Non-destructive memory cleanup via `libav.unlink`.
+- **Diagnostic Pipeline Indicators:**
+  - `CLIENT-SIDE DIRECT PLAYBACK` (blue): rendered when browser natively plays the source without processing.
+  - `CLIENT-SIDE DEMUX/REMUX` (green): rendered when client-side WASM stream copy is active.
+  - `CLIENT-SIDE WASM PROCESSING` (purple): rendered when browser-side audio transcoding or decoding is executed.
+  - `PLAYBACK FAILED` (red): rendered on unsupported format, fetch failure, or CORS restriction.
+- **Isolation Proof:** Intercepts all browser `fetch` and `XMLHttpRequest` calls and confirms that 0 backend playback endpoints (`/api/stream`, `/api/home`, `/api/detail`, `/api/providers`, `/api/search`) are contacted by the experimental player.
+- **Source Acquisition Honesty:** Allows local file upload, pre-staged sample fixtures (`multi-audio.mkv` 5s, `multi-audio-test.mkv` 45s), and direct media URL input. Transparently documents that provider resolution (VegaMovies/CloudStream scrapers) remains server-side due to browser CORS/anti-bot limitations.
+- **Regression Protection:** All existing backend routes, FFmpeg pipeline, provider implementations, and original frontend routes at `/` remain completely intact.
+
+### Verification Evidence
+- `npm run test` → **137/137 pass** (97 server + 40 client tests, including new unit tests for `inspectMatroska`, `browserSupportFor`, and `remuxMkv` dual-track isolation).
+- `npm run build` → Vite production build OK (341ms, bundles client and WASM assets).
+- Node.js WASM execution → verified `remuxMkv` extracts track 0 (en) to 49,480 bytes and track 1 (es) to 49,100 bytes in under 20ms using stream copy.
+- Server health check → verified `GET /api/health` returns `200` with `ok: true`.
+- Zero backend playback requests recorded on the experimental route.
+
+
 
 ## Multi-provider search, search-result details, and real playback (verified)
 

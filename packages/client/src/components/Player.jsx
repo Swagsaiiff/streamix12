@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { createStream, cleanupStream } from "../api.js";
+import { createStream } from "../api.js";
 import { audioTrackLabel } from "../lib/languages.js";
 import {
   AUTO_QUALITY,
@@ -9,6 +9,9 @@ import {
   explainQuality
 } from "../lib/quality.js";
 import { progressStore, clampPosition } from "../lib/progress.js";
+import { inspectMatroska, browserSupportFor } from "../poc/mkv-inspect.js";
+import { remuxMkv, terminateLibav } from "../poc/client-remux.js";
+import { probeMediaSource, detectFormatFromUrl } from "../lib/source-detector.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const HIDE_DELAY_MS = 3000;
@@ -42,13 +45,16 @@ export default function Player({ item, onClose, onProgress }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const hlsRef = useRef(null);
-  const sessionRef = useRef(null);
+  const dashRef = useRef(null);
   const hideTimerRef = useRef(null);
   const saveTimerRef = useRef(0);
   const currentRef = useRef(item);
   const lastSavedRef = useRef(null);
   const savedResumeRef = useRef(null);
   const resumeAppliedRef = useRef(false);
+  const activeBlobRef = useRef(null);
+  const activeBlobUrlRef = useRef(null);
+  const switchingLockRef = useRef(false);
 
   const [current, setCurrent] = useState(item);
   const [attempt, setAttempt] = useState(0);
@@ -70,6 +76,7 @@ export default function Player({ item, onClose, onProgress }) {
   const [sourceNote, setSourceNote] = useState(null);
   const [sourceStatus, setSourceStatus] = useState(null);
   const [sourceProvider, setSourceProvider] = useState(null);
+  const [playbackMode, setPlaybackMode] = useState("direct");
   const [controlsVisible, setControlsVisible] = useState(true);
   const [resumedFrom, setResumedFrom] = useState(null);
   const [ended, setEnded] = useState(false);
@@ -126,6 +133,14 @@ export default function Player({ item, onClose, onProgress }) {
     }, HIDE_DELAY_MS);
   }, []);
 
+  const cleanupActiveMedia = useCallback(() => {
+    if (activeBlobUrlRef.current) {
+      URL.revokeObjectURL(activeBlobUrlRef.current);
+      activeBlobUrlRef.current = null;
+    }
+    activeBlobRef.current = null;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -136,23 +151,27 @@ export default function Player({ item, onClose, onProgress }) {
       setError(null);
       setEnded(false);
       setResumedFrom(null);
+      cleanupActiveMedia();
+
       try {
-        const [stream, hlsModule] = await Promise.all([
-          createStream(playItem.type, playItem.id, {
-            signal: controller.signal,
-            lang: preferredLang || undefined,
-            provider: playItem.provider,
-            season: playItem.season,
-            episode: playItem.episode
-          }),
-          import("hls.js")
-        ]);
-        const Hls = hlsModule.default;
-        if (cancelled) {
-          cleanupStream(stream.sessionId);
-          return;
-        }
-        sessionRef.current = stream.sessionId;
+        const hasExplicitDirectStream =
+          Boolean(playItem.streamUrl) ||
+          (Boolean(playItem.sourceUrl) &&
+            !playItem.sourceUrl.endsWith(".json") &&
+            !playItem.sourceUrl.includes("/meta/"));
+
+        const stream = await createStream(playItem.type, playItem.id, {
+          signal: controller.signal,
+          lang: preferredLang || undefined,
+          provider: playItem.provider,
+          season: playItem.season,
+          episode: playItem.episode,
+          sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.sourceUrl) : undefined,
+          mediaType: playItem.mediaType
+        });
+
+        if (cancelled) return;
+
         setSourceNote(stream.note ?? null);
         setSourceStatus(stream.resolution?.status ?? null);
         setSourceProvider(stream.provider?.name ?? null);
@@ -160,7 +179,7 @@ export default function Player({ item, onClose, onProgress }) {
         const video = videoRef.current;
         if (!video) return;
 
-        // Resume handling: only for the same title/episode, never beyond the real duration.
+        // Resume handling
         const saved = playItem.restart ? null : progressStore.get({
           provider: playItem.provider ?? "default",
           type: playItem.type,
@@ -171,73 +190,219 @@ export default function Player({ item, onClose, onProgress }) {
         savedResumeRef.current = saved;
         resumeAppliedRef.current = false;
 
-        if (!Hls.isSupported()) {
-          if (video.canPlayType("application/vnd.apple.mpegurl")) {
-            video.src = stream.playlistUrl;
-            video.addEventListener(
-              "loadedmetadata",
-              () => {
-                setPhase("ready");
-              },
-              { once: true }
-            );
-            return;
-          }
-          throw new Error("HLS playback is not supported in this browser");
+        const rawSourceUrl = stream.sourceUrl;
+
+        if (!rawSourceUrl) {
+          throw new Error("No playable media URL returned for this source");
         }
 
-        const hls = new Hls({ enableWorker: true });
-        hlsRef.current = hls;
-        if (import.meta.env.DEV) window.__streamixHls = hls;
-        hls.loadSource(stream.playlistUrl);
-        hls.attachMedia(video);
-
-        const syncAudio = (applyPreference = false) => {
-          const tracks = hls.audioTracks ?? [];
-          setAudioTracks(tracks);
-          if (applyPreference && preferredLang) {
-            const match = tracks.find((t) => t.lang === preferredLang);
-            if (match) hls.audioTrack = match.id;
-          }
-        };
-        const syncLevels = () => {
-          const list = hls.levels ?? [];
-          setLevels(list);
-          setActiveLevel(currentQualityValue(hls));
-        };
-
-        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => syncAudio(true));
-        hls.on(Hls.Events.LEVEL_SWITCHED, () => syncLevels());
-        hls.on(Hls.Events.LEVEL_LOADED, () => syncLevels());
-        hls.on(Hls.Events.LEVEL_UPDATED, () => syncLevels());
-        hls.on(Hls.Events.LEVELS_UPDATED, () => syncLevels());
-        hls.on(Hls.Events.MANIFEST_LOADED, () => syncLevels());
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (cancelled) return;
-          syncAudio(true);
-          syncLevels();
-          setPhase("ready");
-          video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+        // Probe media source to inspect response, status, content-type and initial bytes
+        const probe = await probeMediaSource(rawSourceUrl, {
+          signal: controller.signal,
+          headers: stream.headers,
+          declaredType: stream.mediaType
         });
 
-        hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => setActiveTrack(data.id));
+        if (cancelled) return;
 
-        hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (probe.error && !probe.isPlayable) {
+          throw new Error(probe.error);
+        }
+
+        const mediaType = probe.format !== "unknown" ? probe.format : (stream.mediaType || detectFormatFromUrl(rawSourceUrl));
+        const sourceUrl = rawSourceUrl;
+
+        // 1. HLS Streams (.m3u8)
+        if (mediaType === "hls" || sourceUrl.includes(".m3u8")) {
+          setPlaybackMode("hls");
+          const hlsModule = await import("hls.js");
+          const Hls = hlsModule.default;
           if (cancelled) return;
-          if (data.fatal) {
-            setError(`Playback failed: ${data.details ?? data.type}`);
-            setPhase("error");
-            try {
-              hls.destroy();
-            } catch {
-              // already destroyed
+
+          if (!Hls.isSupported()) {
+            if (video.canPlayType("application/vnd.apple.mpegurl")) {
+              video.src = sourceUrl;
+              video.addEventListener("loadedmetadata", () => setPhase("ready"), { once: true });
+              return;
             }
+            throw new Error("HLS playback is not supported in this browser");
           }
+
+          const hls = new Hls({ enableWorker: true });
+          hlsRef.current = hls;
+          if (import.meta.env.DEV) window.__streamixHls = hls;
+          hls.loadSource(sourceUrl);
+          hls.attachMedia(video);
+
+          const syncAudio = (applyPreference = false) => {
+            const tracks = hls.audioTracks ?? [];
+            setAudioTracks(tracks);
+            if (applyPreference && preferredLang) {
+              const match = tracks.find((t) => t.lang === preferredLang);
+              if (match) hls.audioTrack = match.id;
+            }
+          };
+          const syncLevels = () => {
+            const list = hls.levels ?? [];
+            setLevels(list);
+            setActiveLevel(currentQualityValue(hls));
+          };
+
+          hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => syncAudio(true));
+          hls.on(Hls.Events.LEVEL_SWITCHED, () => syncLevels());
+          hls.on(Hls.Events.LEVEL_LOADED, () => syncLevels());
+          hls.on(Hls.Events.LEVEL_UPDATED, () => syncLevels());
+          hls.on(Hls.Events.LEVELS_UPDATED, () => syncLevels());
+          hls.on(Hls.Events.MANIFEST_LOADED, () => syncLevels());
+
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (cancelled) return;
+            syncAudio(true);
+            syncLevels();
+            setPhase("ready");
+            video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+          });
+
+          hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => setActiveTrack(data.id));
+
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (cancelled) return;
+            if (data.fatal) {
+              setError(`Playback failed: ${data.details ?? data.type}`);
+              setPhase("error");
+              try {
+                hls.destroy();
+              } catch {
+                // destroyed
+              }
+            }
+          });
+          return;
+        }
+
+        // 2. DASH Streams (.mpd)
+        if (mediaType === "dash" || sourceUrl.includes(".mpd")) {
+          setPlaybackMode("dash");
+          const { default: dashjs } = await import("dashjs");
+          if (cancelled) return;
+
+          const player = dashjs.MediaPlayer().create();
+          dashRef.current = player;
+          player.initialize(video, sourceUrl, true);
+
+          player.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+            if (cancelled) return;
+            setPhase("ready");
+            video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+          });
+
+          player.on(dashjs.MediaPlayer.events.ERROR, (e) => {
+            if (cancelled) return;
+            setError(`DASH playback error: ${e.error?.message || e.type || "playback failed"}`);
+            setPhase("error");
+          });
+          return;
+        }
+
+        // 3. Direct MP4 / WebM / Native Playback
+        if (mediaType === "mp4" || mediaType === "webm") {
+          const mimeType = mediaType === "mp4" ? "video/mp4" : "video/webm";
+          if (!video.canPlayType(mimeType)) {
+            throw new Error(`Browser cannot decode ${mediaType.toUpperCase()} format natively`);
+          }
+
+          setPlaybackMode("direct");
+          setAudioTracks([]);
+          setLevels(stream.variants ? stream.variants.map((v, i) => ({ height: v.height, index: i })) : []);
+
+          video.src = sourceUrl;
+          video.load();
+          video.addEventListener(
+            "loadedmetadata",
+            () => {
+              if (cancelled) return;
+              setPhase("ready");
+              video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+            },
+            { once: true }
+          );
+          video.addEventListener(
+            "error",
+            () => {
+              if (cancelled) return;
+              setError(
+                video.error
+                  ? `Media error ${video.error.code}: ${video.error.message || "playback error"}`
+                  : "Direct video playback failed"
+              );
+              setPhase("error");
+            },
+            { once: true }
+          );
+          return;
+        }
+
+        // 4. MKV / Matroska Sources -> Client-Side Inspection & Processing
+        setPlaybackMode("client-remux");
+        if (probe.corsBlocked) {
+          throw new Error(
+            "Cannot play MKV: media host blocks browser cross-origin requests (CORS), and browsers cannot demux MKV natively without server-side HLS."
+          );
+        }
+
+        let blob = null;
+        try {
+          const fetchRes = await fetch(sourceUrl, { signal: controller.signal });
+          if (!fetchRes.ok) throw new Error(`HTTP ${fetchRes.status} fetching media file`);
+          blob = await fetchRes.blob();
+        } catch (fetchErr) {
+          if (fetchErr.name === "AbortError") return;
+          throw new Error(`Client-side source fetch failed: ${fetchErr.message}. Possible CORS limitation.`);
+        }
+        if (cancelled) return;
+
+        activeBlobRef.current = blob;
+        const inspection = await inspectMatroska(blob);
+        const support = browserSupportFor(inspection);
+
+        if (support.verdict === "unsupported") {
+          throw new Error(`Unsupported MKV format: ${support.reasons?.join("; ") || "unsupported format"}`);
+        }
+
+        const audioList = (inspection.audioTracks || []).map((t, idx) => ({
+          id: idx,
+          lang: t.language || "und",
+          name: t.name || (t.language ? t.language.toUpperCase() : `Audio Track ${idx + 1}`),
+          codec: t.codec
+        }));
+        setAudioTracks(audioList);
+        setActiveTrack(0);
+
+        if (inspection.video?.height) {
+          setLevels([{ height: inspection.video.height, index: 0 }]);
+        }
+
+        const remuxResult = await remuxMkv(new File([blob], "video.mkv", { type: "video/x-matroska" }), {
+          audioTrackIndex: 0,
+          transcodeAudio: inspection.audioTracks?.[0]?.browser === "needs-transcode"
         });
+        if (cancelled) return;
+
+        activeBlobUrlRef.current = remuxResult.url;
+        video.src = remuxResult.url;
+        video.load();
+        video.addEventListener(
+          "loadedmetadata",
+          () => {
+            if (cancelled) return;
+            setPhase("ready");
+            video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+          },
+          { once: true }
+        );
       } catch (err) {
         if (cancelled || err.name === "AbortError") return;
-        setError(err.message || "Failed to resolve the stream");
+        setError(err.message || "Failed to resolve or play the stream");
         setPhase("error");
       }
     }
@@ -255,8 +420,13 @@ export default function Player({ item, onClose, onProgress }) {
         // already destroyed
       }
       hlsRef.current = null;
-      if (sessionRef.current) cleanupStream(sessionRef.current);
-      sessionRef.current = null;
+      try {
+        dashRef.current?.reset();
+      } catch {
+        // already reset
+      }
+      dashRef.current = null;
+      cleanupActiveMedia();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, attempt]);
@@ -352,7 +522,7 @@ export default function Player({ item, onClose, onProgress }) {
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) video.play().then(() => setPlaying(true)).catch(() => {});
+    if (video.paused) video.play().then(() => setPlaying(true)).catch(() => { });
     else {
       video.pause();
       setPlaying(false);
@@ -403,11 +573,51 @@ export default function Player({ item, onClose, onProgress }) {
     setRate(r);
   }, []);
 
-  const selectAudio = useCallback((id) => {
-    if (!hlsRef.current) return;
-    hlsRef.current.audioTrack = Number(id);
-    setActiveTrack(Number(id));
-  }, []);
+  const selectAudio = useCallback(async (id) => {
+    const trackNum = Number(id);
+    if (hlsRef.current) {
+      hlsRef.current.audioTrack = trackNum;
+      setActiveTrack(trackNum);
+      return;
+    }
+
+    if (playbackMode === "client-remux" && activeBlobRef.current) {
+      if (switchingLockRef.current) return;
+      switchingLockRef.current = true;
+      setSwitching(true);
+      const video = videoRef.current;
+      const preserveTime = video ? video.currentTime : 0;
+      try {
+        const file = new File([activeBlobRef.current], "video.mkv", { type: "video/x-matroska" });
+        const result = await remuxMkv(file, { audioTrackIndex: trackNum });
+        if (activeBlobUrlRef.current) {
+          URL.revokeObjectURL(activeBlobUrlRef.current);
+        }
+        activeBlobUrlRef.current = result.url;
+        setActiveTrack(trackNum);
+        if (video) {
+          video.src = result.url;
+          video.load();
+          video.addEventListener(
+            "loadedmetadata",
+            () => {
+              if (preserveTime > 0 && Number.isFinite(video.duration) && preserveTime < video.duration) {
+                video.currentTime = preserveTime;
+              }
+              video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+              setSwitching(false);
+              switchingLockRef.current = false;
+            },
+            { once: true }
+          );
+        }
+      } catch (err) {
+        setError(`Audio switch failed: ${err.message}`);
+        setSwitching(false);
+        switchingLockRef.current = false;
+      }
+    }
+  }, [playbackMode]);
 
   const selectQuality = useCallback((value) => {
     const hls = hlsRef.current;
@@ -418,8 +628,8 @@ export default function Player({ item, onClose, onProgress }) {
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
+    else el.requestFullscreen().catch(() => { });
     bumpControls();
   }, [bumpControls]);
 
@@ -509,7 +719,7 @@ export default function Player({ item, onClose, onProgress }) {
       {(phase === "resolving" || switching) && (
         <div className="player-center">
           <div className="player-spinner" role="status" aria-label="Loading stream" />
-          <p className="player-center-text">Resolving stream and preparing HLS...</p>
+          <p className="player-center-text">Resolving stream and preparing playback...</p>
         </div>
       )}
 
@@ -518,6 +728,25 @@ export default function Player({ item, onClose, onProgress }) {
           <div className="player-error-panel" role="alert">
             <h2>Playback error</h2>
             <p>{error}</p>
+            {error && (error.includes("Backend server") || error.includes("502") || error.includes("offline")) && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.35)",
+                  borderRadius: "6px",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#93c5fd" }}>Backend Required Provider ({current.provider || "CineStream"}):</strong>
+                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
+                  This title requires server-side stream resolution (VegaMovies HTML scraping, Cloudflare anti-bot bypass, and protected headers). Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH). To stream this title, start the backend server with <code>npm run dev</code>.
+                </p>
+              </div>
+            )}
             <div className="player-error-actions">
               <button type="button" className="player-btn player-btn-primary" onClick={retry}>
                 Retry
@@ -540,8 +769,9 @@ export default function Player({ item, onClose, onProgress }) {
               {displayTitle}
             </span>
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
+            {sourceStatus === "direct_stream" && <span className="player-live-badge" style={{ background: "#059669" }}>Client Direct</span>}
             {sourceStatus === "provider_stream" && (
-              <span className="player-live-badge">{sourceProvider ? `Real source · ${sourceProvider}` : "Real source"}</span>
+              <span className="player-live-badge">{sourceProvider ? `Backend · ${sourceProvider}` : "Backend Resolved"}</span>
             )}
             {sourceNote && (
               <span className="player-source" title={sourceNote}>
