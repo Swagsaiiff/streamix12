@@ -57,6 +57,7 @@ export default function Player({ item, onClose, onProgress }) {
   const switchingLockRef = useRef(false);
   const activeMediaUrlRef = useRef(null);
   const activeConversionRef = useRef(null);
+  const streamHeadersRef = useRef({});
   const operationIdRef = useRef(0);
 
   const [current, setCurrent] = useState(item);
@@ -195,6 +196,8 @@ export default function Player({ item, onClose, onProgress }) {
         const video = videoRef.current;
         if (!video) return;
 
+        streamHeadersRef.current = stream.headers || {};
+
         // Resume handling
         const saved = playItem.restart ? null : progressStore.get({
           provider: playItem.provider ?? "default",
@@ -213,7 +216,7 @@ export default function Player({ item, onClose, onProgress }) {
         }
 
         // Probe media source to inspect response, status, content-type and initial bytes
-        const probe = await probeMediaSource(rawSourceUrl, {
+        let probe = await probeMediaSource(rawSourceUrl, {
           signal: controller.signal,
           headers: stream.headers,
           declaredType: stream.mediaType
@@ -221,12 +224,31 @@ export default function Player({ item, onClose, onProgress }) {
 
         if (cancelled || opId !== operationIdRef.current) return;
 
-        if (probe.error && !probe.isPlayable) {
+        let sourceUrl = rawSourceUrl;
+
+        // If direct fetch is blocked by CORS, use the secure backend media-proxy as transport layer
+        if (probe.corsBlocked) {
+          const proxiedUrl = `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
+          try {
+            const proxyProbe = await probeMediaSource(proxiedUrl, {
+              signal: controller.signal,
+              headers: stream.headers,
+              declaredType: stream.mediaType || probe.format
+            });
+            if (proxyProbe.isPlayable || (!proxyProbe.error && proxyProbe.format !== "unknown")) {
+              sourceUrl = proxiedUrl;
+              probe = proxyProbe;
+            }
+          } catch {
+            // Proxy request failed (e.g. backend server offline)
+          }
+        }
+
+        if (probe.error && !probe.isPlayable && !probe.corsBlocked) {
           throw new Error(probe.error);
         }
 
         const mediaType = probe.format !== "unknown" ? probe.format : (stream.mediaType || detectFormatFromUrl(rawSourceUrl));
-        const sourceUrl = rawSourceUrl;
 
         // 1. HLS Streams (.m3u8)
         if (mediaType === "hls" || sourceUrl.includes(".m3u8")) {
@@ -363,7 +385,7 @@ export default function Player({ item, onClose, onProgress }) {
           setPlaybackMode("client-remux");
           if (probe.corsBlocked) {
             throw new Error(
-              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires CORS access."
+              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires CORS access, and the backend proxy is offline. Start the backend server with 'npm run dev' to enable secure range-streaming."
             );
           }
 
@@ -402,7 +424,8 @@ export default function Player({ item, onClose, onProgress }) {
           // FastStart MP4 remuxing via Mediabunny stream-copy
           const remuxResult = await remuxMkvToMp4(sourceUrl, {
             audioTrackIndex: startingTrackIdx,
-            signal: controller.signal
+            signal: controller.signal,
+            headers: stream.headers
           });
           if (cancelled || opId !== operationIdRef.current) return;
 
@@ -619,7 +642,10 @@ export default function Player({ item, onClose, onProgress }) {
       const video = videoRef.current;
       const preserveTime = video ? video.currentTime : 0;
       try {
-        const result = await remuxMkvToMp4(activeMediaUrlRef.current, { audioTrackIndex: trackNum });
+        const result = await remuxMkvToMp4(activeMediaUrlRef.current, {
+          audioTrackIndex: trackNum,
+          headers: streamHeadersRef.current
+        });
         if (activeBlobUrlRef.current) {
           URL.revokeObjectURL(activeBlobUrlRef.current);
         }
@@ -756,7 +782,7 @@ export default function Player({ item, onClose, onProgress }) {
           <div className="player-error-panel" role="alert">
             <h2>Playback error</h2>
             <p>{error}</p>
-            {error && (error.includes("Backend server") || error.includes("502") || error.includes("offline")) && (
+            {error && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable")) && (
               <div
                 style={{
                   marginTop: "0.85rem",
@@ -769,9 +795,47 @@ export default function Player({ item, onClose, onProgress }) {
                   lineHeight: "1.4"
                 }}
               >
-                <strong style={{ color: "#93c5fd" }}>Backend Required Provider ({current.provider || "CineStream"}):</strong>
+                <strong style={{ color: "#93c5fd" }}>Backend Server Offline (HTTP 502):</strong>
                 <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  This title requires server-side stream resolution (VegaMovies HTML scraping, Cloudflare anti-bot bypass, and protected headers). Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH). To stream this title, start the backend server with <code>npm run dev</code>.
+                  This title requires server-side stream resolution (VegaMovies scraping, Cloudflare anti-bot handling) and media proxying for CORS-restricted hosts. Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH). To stream this title, start the backend server with <code>npm run dev</code>.
+                </p>
+              </div>
+            )}
+            {error && error.includes("CORS") && !error.includes("502") && !error.includes("offline") && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(245, 158, 11, 0.12)",
+                  border: "1px solid rgba(245, 158, 11, 0.35)",
+                  borderRadius: "6px",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#fbbf24" }}>CORS Media Restriction:</strong>
+                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
+                  The media host blocks direct browser cross-origin requests. Client-side MKV demuxing requires byte-range access. Start the backend server to enable secure local range-proxying.
+                </p>
+              </div>
+            )}
+            {error && (error.includes("Unsupported MKV format") || error.includes("E-AC-3") || error.includes("HEVC") || error.includes("codec")) && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(239, 68, 68, 0.12)",
+                  border: "1px solid rgba(239, 68, 68, 0.35)",
+                  borderRadius: "6px",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#fca5a5" }}>Unsupported Codec:</strong>
+                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
+                  The media stream contains codecs (e.g. E-AC-3 Dolby Digital or HEVC/H.265) that your browser cannot decode natively. A proxy cannot alter media codecs without heavy server transcoding.
                 </p>
               </div>
             )}

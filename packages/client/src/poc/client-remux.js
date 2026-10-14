@@ -231,7 +231,7 @@ export async function inspectMkvSource(sourceInput, { signal, headers = {} } = {
 // Performs pure stream-copying without re-encoding and isolates the requested audio track.
 export async function remuxMkvToMp4(
   sourceInput,
-  { audioTrackIndex = 0, signal, onProgress } = {}
+  { audioTrackIndex = 0, signal, onProgress, headers = {} } = {}
 ) {
   let source;
   if (typeof sourceInput === "string") {
@@ -241,7 +241,7 @@ export async function remuxMkvToMp4(
       source = new BlobSource(blob);
     } else {
       source = new UrlSource(sourceInput, {
-        requestInit: { signal }
+        requestInit: { signal, headers }
       });
     }
   } else if (sourceInput instanceof Blob) {

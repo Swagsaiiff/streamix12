@@ -53,6 +53,7 @@ app.get("/", (_req, res) => {
       "GET  /api/detail/:type/:id?provider=<name>",
       "GET  /api/providers/status",
       "POST /api/stream/:type/:id?provider=<name>",
+      "GET  /api/stream/proxy?url=<url>",
       "GET  /api/stream/:sessionId/master.m3u8"
     ]
   });

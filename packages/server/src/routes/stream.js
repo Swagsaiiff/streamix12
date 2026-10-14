@@ -2,6 +2,7 @@ import { Router } from "express";
 import { sendError } from "../errors.js";
 import { logger } from "../logger.js";
 import { ProviderError } from "../providers/base.js";
+import { proxyMediaRequest } from "./proxy.js";
 
 const SESSION_ID_RE = /^[a-f0-9]{64}$/;
 const FILE_RE = /^[A-Za-z0-9._-]+$/;
@@ -24,6 +25,14 @@ export function streamRouter({
   sessionMaxSeconds = 0
 }) {
   const router = Router();
+
+  router.all("/stream/proxy", (req, res) => {
+    return proxyMediaRequest(req, res);
+  });
+
+  router.all("/proxy", (req, res) => {
+    return proxyMediaRequest(req, res);
+  });
 
   router.post("/stream/:type/:id", async (req, res) => {
     const { type, id } = req.params;
