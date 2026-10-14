@@ -144,7 +144,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                 <div className="modal-actions">
                   <button
                     className="btn btn-play"
-                    onClick={() => onPlay?.(item)}
+                    onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}) })}
                     title={resumeInfo ? `Resume from ${Math.floor(resumeInfo.position / 60)}m` : "Play"}
                   >
                     {resumeInfo ? "Resume" : "Play"}
@@ -152,7 +152,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                   {resumeInfo && (
                     <button
                       className="btn btn-secondary"
-                      onClick={() => onPlay?.({ ...item, restart: true })}
+                      onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}), restart: true })}
                     >
                       Start over
                     </button>
@@ -236,7 +236,9 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                               className="episode-card"
                               onClick={() =>
                                 onPlay?.({
-                                  ...item,
+                                  ...(item || {}),
+                                  ...(detail || {}),
+                                  type: "series",
                                   season: ep.season,
                                   episode: ep.episode,
                                   episodeTitle: ep.name ?? null,

@@ -13,11 +13,25 @@ function normalize(str = "") {
     .replace(/[^a-z0-9]/g, "");
 }
 
+function getSignificantWords(str = "") {
+  return str
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !["the", "and", "for", "with", "movie", "full", "online", "ver", "pelicula"].includes(w));
+}
+
 function titlesMatch(target = "", candidate = "") {
   const normTarget = normalize(target);
   const normCandidate = normalize(candidate);
   if (!normTarget || !normCandidate) return false;
-  return normCandidate === normTarget || normCandidate.startsWith(normTarget) || normTarget.startsWith(normCandidate);
+  if (normCandidate === normTarget) return true;
+
+  const targetWords = getSignificantWords(target);
+  if (targetWords.length === 0) return false;
+
+  const candidateWords = new Set(getSignificantWords(candidate));
+  return targetWords.every((w) => candidateWords.has(w));
 }
 
 export class ArchiveOrgSourceProvider extends BaseSourceProvider {

@@ -121,12 +121,14 @@ export async function fetchDetail(type, id, { provider, ...options } = {}) {
 
 import { discoverClientStream } from "./lib/client-provider.js";
 
-export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, ...options } = {}) {
+export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, year, imdbId, signal, ...options } = {}) {
   return await discoverClientStream(
     {
       type,
       id,
       title,
+      year,
+      imdbId: imdbId || (typeof id === "string" && id.startsWith("tt") ? id : null),
       provider,
       season,
       episode,
@@ -135,7 +137,7 @@ export async function createStream(type = "movie", id = "direct", { lang, provid
       mediaType,
       ...options
     },
-    { mediaType, ...options }
+    { signal, mediaType, lang, ...options }
   );
 }
 

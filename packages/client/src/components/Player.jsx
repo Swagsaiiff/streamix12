@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createStream } from "../api.js";
+import { discoverClientStream } from "../lib/client-provider.js";
 import { audioTrackLabel } from "../lib/languages.js";
 import {
   AUTO_QUALITY,
@@ -85,6 +86,8 @@ export default function Player({ item, onClose, onProgress }) {
   const [resumedFrom, setResumedFrom] = useState(null);
   const [ended, setEnded] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [sourceDiagnostics, setSourceDiagnostics] = useState([]);
+  const [sourceLimitation, setSourceLimitation] = useState(null);
 
   const queue = useMemo(() => buildEpisodeQueue(current), [current]);
   const queueIndex = useMemo(() => {
@@ -165,6 +168,8 @@ export default function Player({ item, onClose, onProgress }) {
       setError(null);
       setEnded(false);
       setResumedFrom(null);
+      setSourceDiagnostics([]);
+      setSourceLimitation(null);
       cleanupActiveMedia();
 
       try {
@@ -176,17 +181,27 @@ export default function Player({ item, onClose, onProgress }) {
             !playItem.sourceUrl.endsWith(".json") &&
             !playItem.sourceUrl.includes("/meta/"));
 
-        const stream = await createStream(playItem.type, playItem.id, {
-          signal: controller.signal,
-          lang: preferredLang || undefined,
-          provider: playItem.provider,
-          season: playItem.season,
-          episode: playItem.episode,
-          sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.mediaUrl || playItem.url || playItem.sourceUrl) : undefined,
-          streamUrl: playItem.streamUrl || playItem.mediaUrl || playItem.url,
-          mediaType: playItem.mediaType,
-          title: playItem.title
-        });
+        const stream = await discoverClientStream(
+          {
+            type: playItem.type || "movie",
+            id: playItem.id,
+            title: playItem.title,
+            year: playItem.year,
+            imdbId: playItem.imdb_id || playItem.imdbId || (String(playItem.id).startsWith("tt") ? playItem.id : null),
+            season: playItem.season,
+            episode: playItem.episode,
+            episodeTitle: playItem.episodeTitle,
+            streamUrl: playItem.streamUrl || playItem.mediaUrl || playItem.url,
+            sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.mediaUrl || playItem.url || playItem.sourceUrl) : undefined,
+            mediaType: playItem.mediaType,
+            provider: playItem.provider
+          },
+          {
+            signal: controller.signal,
+            lang: preferredLang || undefined,
+            mediaType: playItem.mediaType
+          }
+        );
 
         if (cancelled || opId !== operationIdRef.current) return;
 
@@ -227,16 +242,16 @@ export default function Player({ item, onClose, onProgress }) {
 
         let sourceUrl = rawSourceUrl;
 
-        // If direct fetch is blocked by CORS, use the secure backend media-proxy if available
+        // If direct fetch is blocked by CORS in browser-only mode:
         if (probe.corsBlocked) {
           const declaredOrDetected = probe.format !== "unknown" ? probe.format : (stream.mediaType || detectFormatFromUrl(rawSourceUrl));
           const isNativeDirectMedia = declaredOrDetected === "mp4" || declaredOrDetected === "webm" || rawSourceUrl.includes(".mp4") || rawSourceUrl.includes(".webm");
 
-          if (stream.streamMode === "client" && !stream.proxyUrl) {
+          if (stream.streamMode === "client") {
             // MKV demuxing strictly requires CORS byte-level access in browser JS
             if (declaredOrDetected === "mkv" || rawSourceUrl.includes(".mkv")) {
               throw new Error(
-                "Media host blocks browser cross-origin requests (CORS). Client-side MKV demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'."
+                "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'. To test playback, use the built-in dual-audio Sample Clip or provide a CORS-enabled direct stream."
               );
             }
             // For native browser formats (MP4, WebM), HTML5 <video src> does not require CORS headers.
@@ -245,36 +260,6 @@ export default function Player({ item, onClose, onProgress }) {
               throw new Error(
                 "Media host blocks browser cross-origin requests (CORS). Direct client-side playback requires the media host to provide 'Access-Control-Allow-Origin: *'."
               );
-            }
-          } else {
-            const proxiedUrl = stream.proxyUrl || `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
-            let proxyProbe;
-            try {
-              proxyProbe = await probeMediaSource(proxiedUrl, {
-                signal: controller.signal,
-                declaredType: stream.mediaType || probe.format
-              });
-            } catch (proxyErr) {
-              if (proxyErr.name === "AbortError") throw proxyErr;
-              if (stream.streamMode === "client") {
-                if (!isNativeDirectMedia) {
-                  throw new Error(
-                    "Media host blocks browser cross-origin requests (CORS). Direct browser playback requires CORS headers on the remote host, and the local backend proxy is offline. Start the backend with 'npm run dev' to proxy this source."
-                  );
-                }
-              } else {
-                throw new Error(`Media proxy connection failed: ${proxyErr.message}`);
-              }
-            }
-
-            if (proxyProbe && proxyProbe.error && !proxyProbe.isPlayable) {
-              // Preserve the proxy HTTP status and response message - do not swallow proxy failures
-              throw new Error(proxyProbe.error);
-            }
-
-            if (proxyProbe && proxyProbe.isPlayable) {
-              sourceUrl = proxiedUrl;
-              probe = proxyProbe;
             }
           }
         }
@@ -420,7 +405,7 @@ export default function Player({ item, onClose, onProgress }) {
           setPlaybackMode("client-remux");
           if (probe.corsBlocked) {
             throw new Error(
-              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires CORS access, and the backend proxy is offline. Start the backend server with 'npm run dev' to enable secure range-streaming."
+              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'. To test playback, use the built-in dual-audio Sample Clip or provide a CORS-enabled direct stream."
             );
           }
 
@@ -487,6 +472,12 @@ export default function Player({ item, onClose, onProgress }) {
       } catch (err) {
         if (cancelled || opId !== operationIdRef.current || err.name === "AbortError") return;
         setError(err.message || "Failed to resolve or play the stream");
+        if (err.diagnostics && Array.isArray(err.diagnostics)) {
+          setSourceDiagnostics(err.diagnostics);
+        }
+        if (err.limitation) {
+          setSourceLimitation(err.limitation);
+        }
         setPhase("error");
       }
     }
@@ -874,6 +865,29 @@ export default function Player({ item, onClose, onProgress }) {
                 </p>
               </div>
             )}
+            {sourceDiagnostics && sourceDiagnostics.length > 0 && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(15, 23, 42, 0.65)",
+                  border: "1px solid rgba(148, 163, 184, 0.25)",
+                  borderRadius: "6px",
+                  fontSize: "0.8rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#94a3b8" }}>Provider Discovery Log:</strong>
+                <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.2rem", color: "#cbd5e1" }}>
+                  {sourceDiagnostics.map((diag, idx) => (
+                    <li key={idx} style={{ marginTop: "0.15rem" }}>
+                      {diag}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {error && !error.includes("No browser-accessible") && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (
               <div
                 style={{
@@ -887,9 +901,9 @@ export default function Player({ item, onClose, onProgress }) {
                   lineHeight: "1.4"
                 }}
               >
-                <strong style={{ color: "#93c5fd" }}>Backend Server Offline (HTTP 502 / Offline):</strong>
+                <strong style={{ color: "#93c5fd" }}>Backend Server Offline:</strong>
                 <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  This title requires server-side stream resolution (VegaMovies scraping, Cloudflare anti-bot handling) and media proxying for CORS-restricted hosts. Direct browser playback works for CORS-enabled direct media sources (MP4, WebM, HLS, DASH, and the dual-audio MKV sample clip). To stream this title, start the backend server with <code>npm run dev</code>.
+                  STREAMIX is operating in browser-only mode. Commercial web-scraping providers (VegaMovies) require a backend server. Supported open titles, archive movies, and the dual-audio Sample Clip play directly in the browser without any server.
                 </p>
               </div>
             )}
@@ -908,7 +922,7 @@ export default function Player({ item, onClose, onProgress }) {
               >
                 <strong style={{ color: "#fbbf24" }}>CORS Media Restriction:</strong>
                 <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  The media host blocks direct browser cross-origin requests. Client-side MKV demuxing requires byte-range access. Start the backend server to enable secure local range-proxying.
+                  The remote media host does not permit browser cross-origin requests (CORS). Client-side MKV demuxing requires the media host to provide "Access-Control-Allow-Origin: *" headers. In browser-only mode, you can play compatible direct MP4/WebM streams or use the built-in dual-audio Sample Clip.
                 </p>
               </div>
             )}

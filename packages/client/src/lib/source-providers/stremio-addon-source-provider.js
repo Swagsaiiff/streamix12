@@ -1,5 +1,19 @@
 import { BaseSourceProvider } from "./provider-interface.js";
-import { detectFormatFromUrl } from "../source-detector.js";
+import { probeMediaSource, detectFormatFromUrl } from "../source-detector.js";
+
+function streamMatchesEpisode(text = "", season, episode) {
+  if (season == null || episode == null) return true;
+  const match = text.match(/[sS](\d+)[eE](\d+)/) || text.match(/(\d+)[xX](\d+)/);
+  if (!match) return true;
+  const s = Number(match[1]);
+  const e = Number(match[2]);
+  return s === Number(season) && e === Number(episode);
+}
+
+function hasForbiddenBrowserHeaders(headers = {}) {
+  const forbidden = ["referer", "origin", "cookie", "user-agent", "host"];
+  return Object.keys(headers).some((k) => forbidden.includes(k.toLowerCase()));
+}
 
 const DEFAULT_STREMIO_ADDON = "https://torrentio.strem.fun";
 
@@ -75,6 +89,40 @@ export class StremioAddonSourceProvider extends BaseSourceProvider {
         // Case A: Direct HTTP/HTTPS stream URL (e.g. from Debrid or HTTP server)
         if (s.url && (s.url.startsWith("http://") || s.url.startsWith("https://"))) {
           directHttpCount++;
+          const streamText = `${s.title || ""} ${s.name || ""} ${s.behaviorHints?.filename || ""}`;
+
+          // Check episode matching for series
+          if (!streamMatchesEpisode(streamText, season, episode)) {
+            continue; // Skip stream for mismatched episode
+          }
+
+          // Check if addon explicitly marked stream as not web-ready
+          if (s.behaviorHints?.notWebReady) {
+            sources.push({
+              url: s.url,
+              format: detectFormatFromUrl(s.url),
+              title: s.title || s.name || title,
+              isPlayableInBrowser: false,
+              provider: this.name,
+              limitation: "Stream marked as not web-ready by addon (requires external media player)"
+            });
+            continue;
+          }
+
+          // Check if stream requires custom upstream headers forbidden in browser sandboxes
+          const reqHeaders = s.behaviorHints?.proxyHeaders?.request || {};
+          if (hasForbiddenBrowserHeaders(reqHeaders)) {
+            sources.push({
+              url: s.url,
+              format: detectFormatFromUrl(s.url),
+              title: s.title || s.name || title,
+              isPlayableInBrowser: false,
+              provider: this.name,
+              limitation: "Stream requires custom upstream headers (Referer/Cookie) that cannot be sent by browser"
+            });
+            continue;
+          }
+
           const detected = detectFormatFromUrl(s.url);
           const format = detected !== "unknown" ? detected : "auto";
           sources.push({
@@ -83,7 +131,7 @@ export class StremioAddonSourceProvider extends BaseSourceProvider {
             title: s.title || s.name || title,
             isPlayableInBrowser: true,
             provider: this.name,
-            headers: s.behaviorHints?.proxyHeaders?.request || {},
+            headers: reqHeaders,
             behaviorHints: s.behaviorHints || null,
             note: "Stremio direct stream URL"
           });

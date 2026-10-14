@@ -121,3 +121,79 @@ test("Episode matching strictly isolates requested episode without returning a d
   assert.equal(path2, "/stream/series/tt0944947:1:2.json");
   assert.notEqual(path1, path2);
 });
+
+test("StremioAddonSourceProvider rejects streams requiring forbidden browser headers or notWebReady", async () => {
+  const provider = new StremioAddonSourceProvider();
+  const originalFetch = globalThis.fetch;
+
+  // Mock addon response with notWebReady, forbidden headers, and mismatched episode
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      streams: [
+        {
+          url: "https://example.com/blocked-headers.mp4",
+          behaviorHints: {
+            proxyHeaders: {
+              request: {
+                Referer: "https://upstream.secret.com",
+                Cookie: "session=123"
+              }
+            }
+          }
+        },
+        {
+          url: "https://example.com/not-web-ready.mkv",
+          behaviorHints: {
+            notWebReady: true
+          }
+        },
+        {
+          url: "https://example.com/wrong-episode.mp4",
+          title: "Show Title S01E05 1080p"
+        }
+      ]
+    })
+  });
+
+  try {
+    const res = await provider.resolveStreams({
+      type: "series",
+      id: "tt1234567",
+      season: 1,
+      episode: 1
+    });
+
+    // Mismatched episode S01E05 was skipped for S01E01 query
+    // Streams with forbidden headers and notWebReady are marked isPlayableInBrowser: false
+    assert.equal(res.sources.length, 2);
+    assert.equal(res.sources[0].isPlayableInBrowser, false);
+    assert.match(res.sources[0].limitation, /forbidden|custom upstream headers/i);
+    assert.equal(res.sources[1].isPlayableInBrowser, false);
+    assert.match(res.sources[1].limitation, /not web-ready/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("discoverClientStream preserves abort signal and queries discovery engine without backend calls", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  const { discoverClientStream } = await import("./client-provider.js");
+
+  // Aborted signal throws AbortError
+  await assert.rejects(
+    async () => {
+      await discoverClientStream(
+        {
+          id: "tt99999999",
+          title: "Nonexistent Title",
+          year: 2099
+        },
+        { signal: controller.signal }
+      );
+    },
+    (err) => err.name === "AbortError"
+  );
+});
