@@ -159,3 +159,16 @@ export function resolveClientStream(item = {}, options = {}) {
     note: "Direct stream resolved client-side"
   };
 }
+
+import { defaultDiscoveryEngine } from "./source-providers/index.js";
+
+export async function discoverClientStream(item = {}, options = {}) {
+  // 1. Fast synchronous check for explicit URLs or registered test fixtures
+  const direct = resolveClientStream(item, options);
+  if (direct) {
+    return direct;
+  }
+
+  // 2. Comprehensive asynchronous discovery across configured source providers
+  return await defaultDiscoveryEngine.discoverStream(item, options);
+}

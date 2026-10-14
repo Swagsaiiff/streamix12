@@ -229,35 +229,54 @@ export default function Player({ item, onClose, onProgress }) {
 
         // If direct fetch is blocked by CORS, use the secure backend media-proxy if available
         if (probe.corsBlocked) {
+          const declaredOrDetected = probe.format !== "unknown" ? probe.format : (stream.mediaType || detectFormatFromUrl(rawSourceUrl));
+          const isNativeDirectMedia = declaredOrDetected === "mp4" || declaredOrDetected === "webm" || rawSourceUrl.includes(".mp4") || rawSourceUrl.includes(".webm");
+
           if (stream.streamMode === "client" && !stream.proxyUrl) {
-            throw new Error(
-              "Media host blocks browser cross-origin requests (CORS). Direct client-side playback requires the media host to provide 'Access-Control-Allow-Origin: *'."
-            );
-          }
-          const proxiedUrl = stream.proxyUrl || `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
-          let proxyProbe;
-          try {
-            proxyProbe = await probeMediaSource(proxiedUrl, {
-              signal: controller.signal,
-              declaredType: stream.mediaType || probe.format
-            });
-          } catch (proxyErr) {
-            if (proxyErr.name === "AbortError") throw proxyErr;
-            if (stream.streamMode === "client") {
+            // MKV demuxing strictly requires CORS byte-level access in browser JS
+            if (declaredOrDetected === "mkv" || rawSourceUrl.includes(".mkv")) {
               throw new Error(
-                "Media host blocks browser cross-origin requests (CORS). Direct browser playback requires CORS headers on the remote host, and the local backend proxy is offline. Start the backend with 'npm run dev' to proxy this source."
+                "Media host blocks browser cross-origin requests (CORS). Client-side MKV demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'."
               );
             }
-            throw new Error(`Media proxy connection failed: ${proxyErr.message}`);
-          }
+            // For native browser formats (MP4, WebM), HTML5 <video src> does not require CORS headers.
+            // Allow playback to proceed directly to native <video> element.
+            if (!isNativeDirectMedia) {
+              throw new Error(
+                "Media host blocks browser cross-origin requests (CORS). Direct client-side playback requires the media host to provide 'Access-Control-Allow-Origin: *'."
+              );
+            }
+          } else {
+            const proxiedUrl = stream.proxyUrl || `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
+            let proxyProbe;
+            try {
+              proxyProbe = await probeMediaSource(proxiedUrl, {
+                signal: controller.signal,
+                declaredType: stream.mediaType || probe.format
+              });
+            } catch (proxyErr) {
+              if (proxyErr.name === "AbortError") throw proxyErr;
+              if (stream.streamMode === "client") {
+                if (!isNativeDirectMedia) {
+                  throw new Error(
+                    "Media host blocks browser cross-origin requests (CORS). Direct browser playback requires CORS headers on the remote host, and the local backend proxy is offline. Start the backend with 'npm run dev' to proxy this source."
+                  );
+                }
+              } else {
+                throw new Error(`Media proxy connection failed: ${proxyErr.message}`);
+              }
+            }
 
-          if (proxyProbe.error && !proxyProbe.isPlayable) {
-            // Preserve the proxy HTTP status and response message - do not swallow proxy failures
-            throw new Error(proxyProbe.error);
-          }
+            if (proxyProbe && proxyProbe.error && !proxyProbe.isPlayable) {
+              // Preserve the proxy HTTP status and response message - do not swallow proxy failures
+              throw new Error(proxyProbe.error);
+            }
 
-          sourceUrl = proxiedUrl;
-          probe = proxyProbe;
+            if (proxyProbe && proxyProbe.isPlayable) {
+              sourceUrl = proxiedUrl;
+              probe = proxyProbe;
+            }
+          }
         }
 
         if (probe.error && !probe.isPlayable && !probe.corsBlocked) {
@@ -834,6 +853,25 @@ export default function Player({ item, onClose, onProgress }) {
                     Play Dual-Audio Sample Clip
                   </button>
                 </div>
+              </div>
+            )}
+            {error && error.includes("BitTorrent") && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(168, 85, 247, 0.12)",
+                  border: "1px solid rgba(168, 85, 247, 0.35)",
+                  borderRadius: "6px",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#d8b4fe" }}>BitTorrent Streams Detected:</strong>
+                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
+                  Streams were discovered on public trackers, but browsers cannot decode raw BitTorrent infoHashes natively. Direct in-browser streaming requires a Debrid service (RealDebrid, AllDebrid, Premiumize) or WebTorrent bridge to convert torrents into HTTP video streams.
+                </p>
               </div>
             )}
             {error && !error.includes("No browser-accessible") && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (

@@ -119,10 +119,10 @@ export async function fetchDetail(type, id, { provider, ...options } = {}) {
   }
 }
 
-import { resolveClientStream } from "./lib/client-provider.js";
+import { discoverClientStream } from "./lib/client-provider.js";
 
-export function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, ...options } = {}) {
-  const directResolved = resolveClientStream(
+export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, ...options } = {}) {
+  return await discoverClientStream(
     {
       type,
       id,
@@ -135,20 +135,8 @@ export function createStream(type = "movie", id = "direct", { lang, provider, se
       mediaType,
       ...options
     },
-    { mediaType }
+    { mediaType, ...options }
   );
-
-  if (directResolved) {
-    return Promise.resolve(directResolved);
-  }
-
-  // Under the browser-only architecture, never call /api/stream/:type/:id.
-  // Report honest limitation directly without misleading backend-offline 502 errors.
-  const err = new Error(
-    `No browser-accessible stream source found for "${title || id}". This title requires server-side scraping (VegaMovies / Cloudflare bypass) which is not available in browser-only mode.`
-  );
-  err.code = "NO_BROWSER_STREAM";
-  return Promise.reject(err);
 }
 
 export function cleanupStream(sessionId) {

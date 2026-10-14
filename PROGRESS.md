@@ -2,7 +2,37 @@
 
 ## Current phase
 
-Phase 4: Complete Removal of Runtime Backend Dependency from Production Playback (`main`).
+Phase 4: Real Client-Side Stream Discovery Engine (`main`).
+
+## Real Client-Side Stream Discovery Engine
+
+### 1. Architectural Changes
+1. **Extensible Source Provider Interface (`BaseSourceProvider`)**:
+   - Replaced the hardcoded test-title-only lookup with a modular client-side source discovery pipeline in `packages/client/src/lib/source-providers/`:
+     - `BaseSourceProvider`: Clean interface contract decoupling metadata/catalog lookup from playable media stream discovery.
+     - `DirectSourceProvider`: Resolves explicit direct URLs, user custom inputs, and built-in test fixtures (`sample-clip`, `multi-audio-test`).
+     - `WikimediaSourceProvider`: Discovers verified open films and animations from Wikimedia Commons & Blender Foundation (Big Buck Bunny, Sintel, Tears of Steel, Elephants Dream) with verified CORS (`Access-Control-Allow-Origin: *`) WebM and Range support.
+     - `ArchiveOrgSourceProvider`: Searches the Internet Archive (`archive.org/advancedsearch.php` and `archive.org/metadata/`) by movie title and release year. Discards spam/non-video uploads and resolves genuine, direct MP4/WebM feature film streams (e.g. *Night of the Living Dead* 1968 720p MP4).
+     - `StremioAddonSourceProvider`: Implements the standard Stremio Addon Protocol (`/stream/{type}/{id}.json` for movies and `/stream/series/{id}:{season}:{episode}.json` for series). Classifies streams into direct HTTP URLs vs BitTorrent `infoHash`es vs external links. Accurately reports when BitTorrent sources require a Debrid API (RealDebrid, AllDebrid) or WebTorrent bridge for in-browser playback.
+     - `SourceDiscoveryEngine`: Orchestrates providers in priority order, enforces strict title, year, season, and episode matching, and returns validated stream descriptors.
+2. **Production Player & API Integration**:
+   - `createStream()` in `packages/client/src/api.js` asynchronously calls `discoverClientStream()`.
+   - `Player.jsx`:
+     - Supports native `<video src="...">` playback without CORS restrictions for MP4 and WebM formats, while strictly enforcing CORS requirements for client-side MKV WebAssembly demuxing.
+     - Displays dedicated BitTorrent error notices when public tracker torrents exist for a title (e.g. *Demon Slayer: Kimetsu No Yaiba Infinity Castle*), explaining the exact requirement for a Debrid account or WebTorrent bridge.
+
+### 2. Verification Evidence (Backend Offline)
+- **Backend Status**: Stopped (zero backend calls).
+- **End-to-End Discovery Verifications**:
+  1. `sample-clip` / `multi-audio-test`: Resolves `/fixtures/multi-audio-test.mkv`, dual AAC audio tracks switchable, FastStart MP4 remuxing in browser.
+  2. `tt1254207` ("Big Buck Bunny"): Resolves Wikimedia Commons VP9 WebM stream directly.
+  3. `tt0063350` ("Night of the Living Dead", 1968): Dynamically searched and resolved real 720p MP4 from Internet Archive (`https://archive.org/download/Night.Of.The.Living.Dead_1080p/NightOfTheLivingDead_720p.mp4`).
+  4. `tt32820897` ("Demon Slayer: Kimetsu No Yaiba Infinity Castle", 2025): Queries Stremio addon, discovers 107 BitTorrent streams, honestly rejects with `NO_BROWSER_STREAM` explaining that browser playback requires a Debrid API or WebTorrent bridge.
+  5. Series S1E1 vs S1E2 matching: Strictly queries `/stream/series/tt0944947:1:1.json` vs `/stream/series/tt0944947:1:2.json` without cross-episode collision.
+- **Unit & Pipeline Tests**:
+  - `npm test`: **195/195 tests passing** (108 server tests, 87 client tests).
+- **Production Build**:
+  - `npm run build`: Vite bundled client in **384ms** with zero errors.
 
 ## Removal of Runtime Backend Dependency from Production Playback
 

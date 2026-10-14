@@ -99,11 +99,14 @@ test("createStream resolves verified open titles client-side without backend", a
 });
 
 test("createStream rejects titles lacking browser-accessible stream without calling backend", async () => {
-  let fetchCalled = false;
+  let backendCalled = false;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = () => {
-    fetchCalled = true;
-    throw new Error("Backend should not be called");
+  globalThis.fetch = (url, ...args) => {
+    if (typeof url === "string" && (url.includes("/api/stream") || url.startsWith("/api/"))) {
+      backendCalled = true;
+      throw new Error(`Backend should not be called: ${url}`);
+    }
+    return originalFetch(url, ...args);
   };
 
   try {
@@ -121,7 +124,7 @@ test("createStream rejects titles lacking browser-accessible stream without call
         return true;
       }
     );
-    assert.equal(fetchCalled, false, "Backend /api/stream was not called");
+    assert.equal(backendCalled, false, "Backend /api/stream was not called");
   } finally {
     globalThis.fetch = originalFetch;
   }
