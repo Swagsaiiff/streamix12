@@ -21,6 +21,9 @@ export function detectMediaType(url, contentType = null) {
   if (ct.includes("application/vnd.apple.mpegurl") || ct.includes("application/x-mpegurl") || /\.m3u8(\?|$)/i.test(str)) {
     return "hls";
   }
+  if (ct.includes("application/dash+xml") || /\.mpd(\?|$)/i.test(str)) {
+    return "dash";
+  }
   if (ct.includes("video/mp4") || /\.mp4(\?|$)/i.test(str)) {
     return "mp4";
   }
@@ -30,15 +33,16 @@ export function detectMediaType(url, contentType = null) {
   if (ct.includes("video/x-matroska") || /\.mkv(\?|$)/i.test(str)) {
     return "mkv";
   }
-  return "mkv";
+  return "unknown";
 }
 
 export function candidateRank(url) {
   const type = detectMediaType(url);
   if (type === "mp4" || type === "mkv") return 0;
   if (type === "hls") return 1;
-  if (type === "webm") return 2;
-  return 3;
+  if (type === "dash") return 2;
+  if (type === "webm") return 3;
+  return 4;
 }
 
 export function episodeFromUrl(url) {

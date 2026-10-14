@@ -8,8 +8,8 @@ export const PROVIDERS = {
     id: "direct",
     name: "Direct Media",
     execution: "client",
-    description: "Plays CORS-enabled MP4, WebM, HLS (.m3u8), and DASH (.mpd) directly in the browser player without server involvement.",
-    supportedFormats: ["mp4", "webm", "hls", "dash"],
+    description: "Plays CORS-enabled MP4, WebM, HLS (.m3u8), DASH (.mpd), and browser-supported MKV files directly in the browser player without server involvement.",
+    supportedFormats: ["mp4", "webm", "hls", "dash", "mkv"],
     requiresBackend: false
   },
   CineStream: {
@@ -65,6 +65,8 @@ export function getStreamResolutionPlan(item) {
 
   const directCandidate =
     item.streamUrl ||
+    item.mediaUrl ||
+    item.url ||
     (item.sourceUrl &&
       !item.sourceUrl.endsWith(".json") &&
       !item.sourceUrl.includes("/meta/")
@@ -73,12 +75,13 @@ export function getStreamResolutionPlan(item) {
 
   if (directCandidate) {
     const detected = detectFormatFromUrl(directCandidate);
-    if (detected !== "json" && detected !== "html" && detected !== "unknown") {
+    const format = detected !== "unknown" ? detected : (item.mediaType || null);
+    if (format && format !== "json" && format !== "html" && format !== "unknown") {
       return {
         canResolveClientSide: true,
         sourceUrl: directCandidate,
         provider: item.provider || "Direct",
-        format: detected,
+        format,
         requiresBackend: false,
         reasons: []
       };

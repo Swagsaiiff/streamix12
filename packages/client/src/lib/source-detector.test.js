@@ -103,3 +103,84 @@ test("probeMediaSource rejects JSON metadata endpoints passed as streams", async
   assert.equal(res.isPlayable, false);
   assert.match(res.error, /JSON metadata endpoint/i);
 });
+
+test("detectFormatFromUrl returns unknown for extensionless URLs and does not assume mkv", () => {
+  assert.equal(detectFormatFromUrl("https://example.com/stream/vincenzo-1080p"), "unknown");
+  assert.equal(detectFormatFromUrl("https://fastdl.icu/download/token12345"), "unknown");
+  assert.equal(detectFormatFromUrl("https://vcloud.beer/view/abc"), "unknown");
+});
+
+test("probeMediaSource detects format from redirect location", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 200,
+    ok: true,
+    url: "https://storage.example.com/files/vincenzo-s01e01.mp4",
+    headers: new Headers({ "content-type": "application/octet-stream" }),
+    arrayBuffer: async () => new Uint8Array([0x00, 0x00, 0x00, 0x1c, 0x66, 0x74, 0x79, 0x70]).buffer
+  });
+
+  try {
+    const res = await probeMediaSource("https://example.com/api/get-link?id=123");
+    assert.equal(res.format, "mp4");
+    assert.equal(res.isPlayable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("probeMediaSource detects format from Content-Disposition header", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 200,
+    ok: true,
+    url: "https://example.com/download/123",
+    headers: new Headers({
+      "content-disposition": 'attachment; filename="episode.webm"',
+      "content-type": "application/octet-stream"
+    }),
+    arrayBuffer: async () => new Uint8Array([]).buffer
+  });
+
+  try {
+    const res = await probeMediaSource("https://example.com/download/123");
+    assert.equal(res.format, "webm");
+    assert.equal(res.isPlayable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("probeMediaSource flags HTTP 410 as expired link", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 410,
+    ok: false,
+    headers: new Headers({ "content-type": "text/plain" }),
+    arrayBuffer: async () => new Uint8Array([]).buffer
+  });
+
+  try {
+    const res = await probeMediaSource("https://example.com/expired-stream");
+    assert.equal(res.format, "expired");
+    assert.equal(res.isPlayable, false);
+    assert.match(res.error, /HTTP 410/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("probeMediaSource marks corsBlocked when fetch fails with network error", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  try {
+    const res = await probeMediaSource("https://cors-blocked.example.com/video.mkv");
+    assert.equal(res.corsBlocked, true);
+    assert.equal(res.format, "mkv"); // format known from extension
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

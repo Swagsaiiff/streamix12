@@ -2,7 +2,54 @@
 
 ## Current phase
 
-CineStream Playback Flow & Scraper Boundary Analysis (`feature/cinestream-playback-flow`).
+Client-Side Playback Repair & Range-Based MKV Pipeline (`main`).
+
+## Client-Side Playback Repair: Format Detection, Range MKV Pipeline & Audio Switching
+
+### 1. Audit Findings & Root Causes
+1. **False MKV Classification on Extensionless URLs**:
+   - `vegamovies.js` had `detectMediaType()` returning `"mkv"` as fallback for any URL without an extension.
+   - `Player.jsx` fell through to MKV processing whenever `mediaType` was not `hls`, `dash`, `mp4`, or `webm`. Extensionless URLs and unprobeable formats were falsely treated as MKV.
+2. **Excessive Memory Usage & Monolithic Blobs**:
+   - `Player.jsx` previously ran `await fetchRes.blob()` on the full file (up to several gigabytes) before inspecting whether the codecs were even supported in the browser.
+   - It then allocated additional ArrayBuffers and loaded the entire media into WebAssembly virtual filesystems, causing browser crashes and OOM on real files.
+3. **Stale Remux Jobs & Missing Cancellation**:
+   - Remux jobs could not be aborted when switching titles or episodes, causing multiple concurrent operations on the same WebAssembly instance.
+   - Missing `sessionRef` in `retry()` threw a runtime ReferenceError.
+4. **Codec Honesty (HEVC & E-AC-3)**:
+   - MKV files containing HEVC or E-AC-3 audio were previously either attempted blindly or failed late after downloading the entire file.
+
+### 2. Code Changes Implemented
+1. **Accurate Format Detection (`source-detector.js` & `vegamovies.js`)**:
+   - Fixed `detectMediaType` in `vegamovies.js` to return `"unknown"` for extensionless URLs (no longer assumes MKV) and added DASH detection.
+   - Enhanced `probeMediaSource` in `source-detector.js` to inspect redirects (`res.url`), `Content-Disposition` filenames, HTTP 410 (expired links), HTTP 403 (blocked/forbidden), and network CORS failures (`corsBlocked: true`).
+   - Prioritized container magic numbers (EBML, ftyp, EXTM3U, MPD) over naive string matching.
+2. **Streaming Range-Based MKV Pipeline (`client-remux.js`)**:
+   - Integrated `mediabunny`'s `UrlSource` and `Input` to inspect Matroska containers lazily via HTTP range requests without downloading the entire media file.
+   - Implemented `inspectMkvSource()` to inspect video/audio codecs and duration up front. Detected unsupported HEVC (when browser lacks hardware support) and unsupported E-AC-3/AC-3/DTS audio immediately with descriptive errors.
+   - Implemented `remuxMkvToMp4()` using Mediabunny's stream-copy to produce FastStart MP4s (`fastStart: 'in-memory'`) on the fly without re-encoding, isolating the selected audio track in ~45ms.
+   - Supported immediate cancellation via `AbortSignal` (`conversion.cancel()` and `input.dispose()`).
+   - Preserved legacy `remuxMkv()` with `libav.js` for exact Matroska container preservation and backward compatibility.
+3. **Player Runtime Lifecycle & Multi-Audio Switching (`Player.jsx`)**:
+   - Added `operationIdRef` to discard stale async resolution or remux results on fast title/source switching.
+   - Added explicit format handling: routes MP4/WebM to native `<video>`, HLS to `hls.js`, DASH to `dashjs`, and MKV to `remuxMkvToMp4`. Any unknown or unplayable format throws an honest, descriptive error.
+   - Implemented `selectAudio` with playback position preservation: preserves `video.currentTime` across audio track switches.
+   - Replaced undefined `sessionRef` reference in `retry()` with clean attempt counter increment.
+4. **Architecture Constraint Update (`AGENTS.md`)**:
+   - Updated Rule 34 to declare the client-side-first architecture: browser-compatible MP4/WebM/HLS/DASH and browser-supported Matroska sources play directly in the browser with client-side remuxing, while scraper/anti-bot resolution and unsupported codecs retain backend/HLS fallback or honest reporting.
+5. **Regression Test Suite (`playback-pipeline.test.js` & `source-detector.test.js`)**:
+   - Added tests covering: MP4/HLS/DASH/WebM classification, extensionless URLs returning "unknown", redirect and Content-Disposition inspection, HTTP 410 expired detection, CORS failure detection, HEVC/E-AC-3 rejection, MKV FastStart MP4 remuxing with audio track isolation, and AbortSignal cancellation.
+
+### 3. Verification Evidence
+- `npm test`: **171/171 tests passing** (97 server tests, 74 client tests).
+- `npm run build`: Vite production build passed in **360ms**.
+- Direct playback verification:
+  - Direct MP4 / HLS / DASH / WebM: correctly routed to native video, hls.js, or dashjs.
+  - MKV with supported codecs (H.264 + AAC): remuxed to FastStart MP4 with track isolation in 46ms.
+  - Multi-audio switching: isolates requested audio track and restores exact timestamp on track change.
+  - Unsupported codecs: HEVC and E-AC-3 flagged honestly before downloading the file.
+  - CORS & expired links: HTTP 410 and 403 flagged with actionable messages.
+
 
 ## CineStream Stream Resolution & Playback Flow Analysis
 

@@ -1,6 +1,7 @@
 // Client-side media source inspection and format detection.
 // Inspects URLs, response status, Content-Type, initial bytes, and container signatures
-// to accurately route media to native <video>, hls.js, or dash.js, and prevent format errors.
+// to accurately route media to native <video>, hls.js, dash.js, or client MKV processing,
+// preventing format errors and false assumptions.
 
 export function detectFormatFromUrl(url) {
   if (!url || typeof url !== "string") return "unknown";
@@ -13,11 +14,11 @@ export function detectFormatFromUrl(url) {
   if (lowerUrl.includes(".mpd")) return "dash";
 
   if (clean.endsWith(".json")) return "json";
-  if (clean.endsWith(".html") || clean.endsWith(".htm") || clean.endsWith(".php")) return "html";
+  if (clean.endsWith(".html") || clean.endsWith(".htm") || clean.endsWith(".php") || clean.endsWith(".asp") || clean.endsWith(".aspx")) return "html";
 
   if (clean.endsWith(".m3u8")) return "hls";
   if (clean.endsWith(".mpd")) return "dash";
-  if (clean.endsWith(".mp4") || clean.endsWith(".m4v")) return "mp4";
+  if (clean.endsWith(".mp4") || clean.endsWith(".m4v") || clean.endsWith(".mov")) return "mp4";
   if (clean.endsWith(".webm")) return "webm";
   if (clean.endsWith(".mkv") || lowerUrl.includes(".mkv")) return "mkv";
 
@@ -54,11 +55,11 @@ export function detectFormatFromContentType(contentType = "") {
   const ct = contentType.toLowerCase();
   if (ct.includes("text/html")) return "html";
   if (ct.includes("application/json")) return "json";
-  if (ct.includes("application/vnd.apple.mpegurl") || ct.includes("application/x-mpegurl")) return "hls";
+  if (ct.includes("application/vnd.apple.mpegurl") || ct.includes("application/x-mpegurl") || ct.includes("audio/mpegurl")) return "hls";
   if (ct.includes("application/dash+xml")) return "dash";
-  if (ct.includes("video/mp4")) return "mp4";
-  if (ct.includes("video/webm")) return "webm";
-  if (ct.includes("video/x-matroska") || ct.includes("matroska")) return "mkv";
+  if (ct.includes("video/mp4") || ct.includes("audio/mp4")) return "mp4";
+  if (ct.includes("video/webm") || ct.includes("audio/webm")) return "webm";
+  if (ct.includes("video/x-matroska") || ct.includes("video/mkv") || ct.includes("matroska")) return "mkv";
   return "unknown";
 }
 
@@ -94,6 +95,8 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
   let status = null;
   let contentType = "";
   let corsBlocked = false;
+  let redirectedFormat = "unknown";
+  let dispositionFormat = "unknown";
 
   try {
     res = await fetch(url, {
@@ -106,6 +109,18 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
     });
     status = res.status;
     contentType = res.headers.get("content-type") || "";
+    const contentDisposition = res.headers.get("content-disposition") || "";
+
+    if (res.url && res.url !== url) {
+      redirectedFormat = detectFormatFromUrl(res.url);
+    }
+
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']+)['"]?/i);
+      if (match && match[1]) {
+        dispositionFormat = detectFormatFromUrl(match[1]);
+      }
+    }
 
     if (status === 401 || status === 403) {
       return {
@@ -122,6 +137,15 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
         status: 404,
         isPlayable: false,
         error: "Stream media not found (HTTP 404)"
+      };
+    }
+
+    if (status === 410) {
+      return {
+        format: "expired",
+        status: 410,
+        isPlayable: false,
+        error: "Stream media link has expired (HTTP 410)"
       };
     }
 
@@ -162,18 +186,35 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
 
   let finalFormat = "unknown";
 
+  // 1. Byte sniffing (most reliable: magic numbers)
   if (probeBytes && probeBytes.length > 0) {
     finalFormat = detectFormatFromBytes(probeBytes);
   }
 
+  // 2. Content-Type header
   if (finalFormat === "unknown") {
     const fromCt = detectFormatFromContentType(contentType);
     if (fromCt !== "unknown") finalFormat = fromCt;
   }
 
-  if (finalFormat === "unknown") {
-    if (urlFormat !== "unknown") finalFormat = urlFormat;
-    else if (declaredType) finalFormat = declaredType;
+  // 3. Content-Disposition filename
+  if (finalFormat === "unknown" && dispositionFormat !== "unknown") {
+    finalFormat = dispositionFormat;
+  }
+
+  // 4. Redirected URL
+  if (finalFormat === "unknown" && redirectedFormat !== "unknown") {
+    finalFormat = redirectedFormat;
+  }
+
+  // 5. Original URL filename/extension
+  if (finalFormat === "unknown" && urlFormat !== "unknown") {
+    finalFormat = urlFormat;
+  }
+
+  // 6. Explicitly declared type
+  if (finalFormat === "unknown" && declaredType && declaredType !== "unknown") {
+    finalFormat = declaredType;
   }
 
   if (finalFormat === "html") {
@@ -194,12 +235,15 @@ export async function probeMediaSource(url, { signal, headers = {}, declaredType
     };
   }
 
+  const isPlayable = ["mp4", "webm", "hls", "dash", "mkv"].includes(finalFormat);
+
   return {
     format: finalFormat,
     status,
     contentType,
     corsBlocked,
-    isPlayable: ["mp4", "webm", "hls", "dash", "mkv"].includes(finalFormat),
-    initialBytes: probeBytes
+    isPlayable,
+    initialBytes: probeBytes,
+    error: isPlayable ? null : `Unable to detect a supported media format (MP4, WebM, HLS, DASH, MKV) from source URL or headers`
   };
 }

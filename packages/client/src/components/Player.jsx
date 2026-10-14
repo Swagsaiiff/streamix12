@@ -10,7 +10,7 @@ import {
 } from "../lib/quality.js";
 import { progressStore, clampPosition } from "../lib/progress.js";
 import { inspectMatroska, browserSupportFor } from "../poc/mkv-inspect.js";
-import { remuxMkv, terminateLibav } from "../poc/client-remux.js";
+import { remuxMkv, remuxMkvToMp4, inspectMkvSource, terminateLibav } from "../poc/client-remux.js";
 import { probeMediaSource, detectFormatFromUrl } from "../lib/source-detector.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -55,6 +55,9 @@ export default function Player({ item, onClose, onProgress }) {
   const activeBlobRef = useRef(null);
   const activeBlobUrlRef = useRef(null);
   const switchingLockRef = useRef(false);
+  const activeMediaUrlRef = useRef(null);
+  const activeConversionRef = useRef(null);
+  const operationIdRef = useRef(0);
 
   const [current, setCurrent] = useState(item);
   const [attempt, setAttempt] = useState(0);
@@ -134,17 +137,27 @@ export default function Player({ item, onClose, onProgress }) {
   }, []);
 
   const cleanupActiveMedia = useCallback(() => {
+    if (activeConversionRef.current) {
+      try {
+        activeConversionRef.current.cancel();
+      } catch {
+        // ignore
+      }
+      activeConversionRef.current = null;
+    }
     if (activeBlobUrlRef.current) {
       URL.revokeObjectURL(activeBlobUrlRef.current);
       activeBlobUrlRef.current = null;
     }
     activeBlobRef.current = null;
+    activeMediaUrlRef.current = null;
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     const playItem = current;
+    const opId = ++operationIdRef.current;
 
     async function start() {
       setPhase("resolving");
@@ -156,6 +169,8 @@ export default function Player({ item, onClose, onProgress }) {
       try {
         const hasExplicitDirectStream =
           Boolean(playItem.streamUrl) ||
+          Boolean(playItem.mediaUrl) ||
+          Boolean(playItem.url) ||
           (Boolean(playItem.sourceUrl) &&
             !playItem.sourceUrl.endsWith(".json") &&
             !playItem.sourceUrl.includes("/meta/"));
@@ -166,11 +181,12 @@ export default function Player({ item, onClose, onProgress }) {
           provider: playItem.provider,
           season: playItem.season,
           episode: playItem.episode,
-          sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.sourceUrl) : undefined,
+          sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.mediaUrl || playItem.url || playItem.sourceUrl) : undefined,
+          streamUrl: playItem.streamUrl || playItem.mediaUrl || playItem.url,
           mediaType: playItem.mediaType
         });
 
-        if (cancelled) return;
+        if (cancelled || opId !== operationIdRef.current) return;
 
         setSourceNote(stream.note ?? null);
         setSourceStatus(stream.resolution?.status ?? null);
@@ -203,7 +219,7 @@ export default function Player({ item, onClose, onProgress }) {
           declaredType: stream.mediaType
         });
 
-        if (cancelled) return;
+        if (cancelled || opId !== operationIdRef.current) return;
 
         if (probe.error && !probe.isPlayable) {
           throw new Error(probe.error);
@@ -342,66 +358,76 @@ export default function Player({ item, onClose, onProgress }) {
           return;
         }
 
-        // 4. MKV / Matroska Sources -> Client-Side Inspection & Processing
-        setPlaybackMode("client-remux");
-        if (probe.corsBlocked) {
-          throw new Error(
-            "Cannot play MKV: media host blocks browser cross-origin requests (CORS), and browsers cannot demux MKV natively without server-side HLS."
+        // 4. MKV / Matroska Sources -> Client-Side Range-Based Remuxing
+        if (mediaType === "mkv") {
+          setPlaybackMode("client-remux");
+          if (probe.corsBlocked) {
+            throw new Error(
+              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires CORS access."
+            );
+          }
+
+          activeMediaUrlRef.current = sourceUrl;
+
+          // Range-based inspection without downloading the entire file
+          const inspection = await inspectMkvSource(sourceUrl, {
+            signal: controller.signal,
+            headers: stream.headers
+          });
+
+          if (cancelled || opId !== operationIdRef.current) return;
+
+          if (!inspection.isSupported) {
+            throw new Error(`Unsupported MKV format: ${inspection.unsupportedReasons.join("; ")}`);
+          }
+
+          const audioList = inspection.audioTracks || [];
+          setAudioTracks(audioList);
+
+          if (inspection.video?.height) {
+            setLevels([{ height: inspection.video.height, index: 0 }]);
+          }
+
+          let startingTrackIdx = 0;
+          if (preferredLang) {
+            const prefIdx = audioList.findIndex((t) => t.isPlayable && t.language === preferredLang);
+            if (prefIdx >= 0) startingTrackIdx = prefIdx;
+          }
+          if (audioList[startingTrackIdx] && !audioList[startingTrackIdx].isPlayable) {
+            const firstPlayable = audioList.findIndex((t) => t.isPlayable);
+            if (firstPlayable >= 0) startingTrackIdx = firstPlayable;
+          }
+          setActiveTrack(startingTrackIdx);
+
+          // FastStart MP4 remuxing via Mediabunny stream-copy
+          const remuxResult = await remuxMkvToMp4(sourceUrl, {
+            audioTrackIndex: startingTrackIdx,
+            signal: controller.signal
+          });
+          if (cancelled || opId !== operationIdRef.current) return;
+
+          activeBlobUrlRef.current = remuxResult.url;
+          video.src = remuxResult.url;
+          video.load();
+          video.addEventListener(
+            "loadedmetadata",
+            () => {
+              if (cancelled || opId !== operationIdRef.current) return;
+              setPhase("ready");
+              applySavedResume();
+              video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+            },
+            { once: true }
           );
+          return;
         }
 
-        let blob = null;
-        try {
-          const fetchRes = await fetch(sourceUrl, { signal: controller.signal });
-          if (!fetchRes.ok) throw new Error(`HTTP ${fetchRes.status} fetching media file`);
-          blob = await fetchRes.blob();
-        } catch (fetchErr) {
-          if (fetchErr.name === "AbortError") return;
-          throw new Error(`Client-side source fetch failed: ${fetchErr.message}. Possible CORS limitation.`);
-        }
-        if (cancelled) return;
-
-        activeBlobRef.current = blob;
-        const inspection = await inspectMatroska(blob);
-        const support = browserSupportFor(inspection);
-
-        if (support.verdict === "unsupported") {
-          throw new Error(`Unsupported MKV format: ${support.reasons?.join("; ") || "unsupported format"}`);
-        }
-
-        const audioList = (inspection.audioTracks || []).map((t, idx) => ({
-          id: idx,
-          lang: t.language || "und",
-          name: t.name || (t.language ? t.language.toUpperCase() : `Audio Track ${idx + 1}`),
-          codec: t.codec
-        }));
-        setAudioTracks(audioList);
-        setActiveTrack(0);
-
-        if (inspection.video?.height) {
-          setLevels([{ height: inspection.video.height, index: 0 }]);
-        }
-
-        const remuxResult = await remuxMkv(new File([blob], "video.mkv", { type: "video/x-matroska" }), {
-          audioTrackIndex: 0,
-          transcodeAudio: inspection.audioTracks?.[0]?.browser === "needs-transcode"
-        });
-        if (cancelled) return;
-
-        activeBlobUrlRef.current = remuxResult.url;
-        video.src = remuxResult.url;
-        video.load();
-        video.addEventListener(
-          "loadedmetadata",
-          () => {
-            if (cancelled) return;
-            setPhase("ready");
-            video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
-          },
-          { once: true }
+        // 5. Unknown or unsupported format
+        throw new Error(
+          probe.error || `Unsupported media format "${mediaType || 'unknown'}". Cannot play in browser.`
         );
       } catch (err) {
-        if (cancelled || err.name === "AbortError") return;
+        if (cancelled || opId !== operationIdRef.current || err.name === "AbortError") return;
         setError(err.message || "Failed to resolve or play the stream");
         setPhase("error");
       }
@@ -581,15 +607,19 @@ export default function Player({ item, onClose, onProgress }) {
       return;
     }
 
-    if (playbackMode === "client-remux" && activeBlobRef.current) {
+    if (playbackMode === "client-remux" && activeMediaUrlRef.current) {
       if (switchingLockRef.current) return;
+      const targetTrack = audioTracks[trackNum];
+      if (targetTrack && targetTrack.isPlayable === false) {
+        setError(`Audio track "${targetTrack.name}" uses ${targetTrack.codec?.toUpperCase()}, which cannot be decoded in the browser.`);
+        return;
+      }
       switchingLockRef.current = true;
       setSwitching(true);
       const video = videoRef.current;
       const preserveTime = video ? video.currentTime : 0;
       try {
-        const file = new File([activeBlobRef.current], "video.mkv", { type: "video/x-matroska" });
-        const result = await remuxMkv(file, { audioTrackIndex: trackNum });
+        const result = await remuxMkvToMp4(activeMediaUrlRef.current, { audioTrackIndex: trackNum });
         if (activeBlobUrlRef.current) {
           URL.revokeObjectURL(activeBlobUrlRef.current);
         }
@@ -617,7 +647,7 @@ export default function Player({ item, onClose, onProgress }) {
         switchingLockRef.current = false;
       }
     }
-  }, [playbackMode]);
+  }, [playbackMode, audioTracks]);
 
   const selectQuality = useCallback((value) => {
     const hls = hlsRef.current;
@@ -634,8 +664,6 @@ export default function Player({ item, onClose, onProgress }) {
   }, [bumpControls]);
 
   const retry = useCallback(() => {
-    if (sessionRef.current) cleanupStream(sessionRef.current);
-    sessionRef.current = null;
     setAttempt((n) => n + 1);
   }, []);
 
