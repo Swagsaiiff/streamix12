@@ -130,9 +130,9 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                 {runtime && <span className="badge">{runtime}</span>}
                 {isSeries && episodeCount > 0 && <span className="badge">{episodeCount} episodes</span>}
                 {resolutionPlan.canResolveClientSide ? (
-                  <span className="badge badge-client" title="Direct browser stream: plays without backend server">Browser Direct</span>
+                  <span className="badge badge-client" title="Direct browser stream: plays without backend server">Browser Playable</span>
                 ) : (
-                  <span className="badge badge-backend" title={`Requires backend server for protected provider scraping (${resolutionPlan.provider})`}>Backend Required</span>
+                  <span className="badge badge-backend" title="Title requires server-side web scraping (VegaMovies / Cloudflare bypass); not available in browser-only mode">Scraper Required</span>
                 )}
                 {genres?.slice(0, 3).map((genre) => (
                   <span className="badge badge-genre" key={genre}>

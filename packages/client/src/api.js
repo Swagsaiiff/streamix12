@@ -121,11 +121,12 @@ export async function fetchDetail(type, id, { provider, ...options } = {}) {
 
 import { resolveClientStream } from "./lib/client-provider.js";
 
-export function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, ...options } = {}) {
+export function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, ...options } = {}) {
   const directResolved = resolveClientStream(
     {
       type,
       id,
+      title,
       provider,
       season,
       episode,
@@ -141,15 +142,13 @@ export function createStream(type = "movie", id = "direct", { lang, provider, se
     return Promise.resolve(directResolved);
   }
 
-  const base = `/api/stream/${type}/${encodeURIComponent(id)}`;
-  const params = new URLSearchParams();
-  if (lang) params.set("lang", lang);
-  if (provider) params.set("provider", provider);
-  if (season != null) params.set("season", String(season));
-  if (episode != null) params.set("episode", String(episode));
-  const query = params.toString();
-  const path = query ? `${base}?${query}` : base;
-  return request(path, { method: "POST", ...options });
+  // Under the browser-only architecture, never call /api/stream/:type/:id.
+  // Report honest limitation directly without misleading backend-offline 502 errors.
+  const err = new Error(
+    `No browser-accessible stream source found for "${title || id}". This title requires server-side scraping (VegaMovies / Cloudflare bypass) which is not available in browser-only mode.`
+  );
+  err.code = "NO_BROWSER_STREAM";
+  return Promise.reject(err);
 }
 
 export function cleanupStream(sessionId) {

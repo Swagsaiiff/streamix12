@@ -123,15 +123,15 @@ test("getStreamResolutionPlan routes direct media with query strings to client r
   assert.equal(plan.requiresBackend, false);
 });
 
-test("getStreamResolutionPlan marks CineStream and VegaMovies as backend-required for stream resolution", () => {
+test("getStreamResolutionPlan reports honest browser-only capabilities for CineStream and VegaMovies", () => {
   const cinestreamPlan = getStreamResolutionPlan({
     title: "Vincenzo",
     provider: "CineStream",
     sourceUrl: "https://v3-cinemeta.strem.io/meta/series/tt13433812.json"
   });
   assert.equal(cinestreamPlan.canResolveClientSide, false);
-  assert.equal(cinestreamPlan.requiresBackend, true);
-  assert.match(cinestreamPlan.reasons[0], /metadata-only/i);
+  assert.equal(cinestreamPlan.requiresBackend, false);
+  assert.match(cinestreamPlan.reasons[0], /No browser-accessible stream source found/i);
 
   const vegaPlan = getStreamResolutionPlan({
     title: "Interstellar",
@@ -139,5 +139,5 @@ test("getStreamResolutionPlan marks CineStream and VegaMovies as backend-require
   });
   assert.equal(vegaPlan.canResolveClientSide, false);
   assert.equal(vegaPlan.requiresBackend, true);
-  assert.match(vegaPlan.reasons[0], /Access-Control-Allow-Origin/i);
+  assert.match(vegaPlan.reasons[0], /No browser-accessible stream source found/i);
 });

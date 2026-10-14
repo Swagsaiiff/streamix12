@@ -15,13 +15,12 @@ test("client-provider classifies Direct as client-side with no backend requireme
   assert.equal(isBackendRequiredForStream("Direct"), false);
 });
 
-test("client-provider classifies CineStream as hybrid (client catalog, backend stream)", () => {
+test("client-provider classifies CineStream as client-first with no backend requirement", () => {
   const info = getProviderInfo("CineStream");
-  assert.equal(info.execution, "client-catalog");
-  assert.equal(info.requiresBackendForStreams, true);
-  assert.equal(isBackendRequiredForStream("CineStream"), true);
-  assert.ok(info.backendReasons.length >= 3);
-  assert.match(info.backendReasons[0], /metadata-only/i);
+  assert.equal(info.execution, "client-first");
+  assert.equal(info.requiresBackend, false);
+  assert.equal(info.requiresBackendForStreams, false);
+  assert.equal(isBackendRequiredForStream("CineStream"), false);
 });
 
 test("client-provider documents real reasons why VegaMovies requires backend", () => {
@@ -34,23 +33,39 @@ test("client-provider documents real reasons why VegaMovies requires backend", (
 
 test("getStreamResolutionPlan identifies direct media as client-resolvable", () => {
   const plan = getStreamResolutionPlan({
-    title: "Big Buck Bunny",
-    streamUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+    title: "Sample Video",
+    streamUrl: "https://example.com/video.mp4"
   });
   assert.equal(plan.canResolveClientSide, true);
   assert.equal(plan.format, "mp4");
   assert.equal(plan.requiresBackend, false);
 });
 
-test("getStreamResolutionPlan identifies metadata JSON as requiring backend resolution", () => {
+test("getStreamResolutionPlan resolves verified open titles client-side via registry", () => {
+  const bbbPlan = getStreamResolutionPlan({ id: "tt1254207", title: "Big Buck Bunny", provider: "CineStream" });
+  assert.equal(bbbPlan.canResolveClientSide, true);
+  assert.equal(bbbPlan.format, "webm");
+  assert.ok(bbbPlan.sourceUrl.includes("wikimedia.org"));
+
+  const sintelPlan = getStreamResolutionPlan({ id: "tt1727587", title: "Sintel", provider: "CineStream" });
+  assert.equal(sintelPlan.canResolveClientSide, true);
+  assert.equal(sintelPlan.format, "webm");
+
+  const samplePlan = getStreamResolutionPlan({ id: "sample-clip" });
+  assert.equal(samplePlan.canResolveClientSide, true);
+  assert.equal(samplePlan.format, "mkv");
+  assert.equal(samplePlan.sourceUrl, "/fixtures/multi-audio-test.mkv");
+});
+
+test("getStreamResolutionPlan identifies scraper-dependent titles honestly without backend", () => {
   const plan = getStreamResolutionPlan({
-    title: "Vincenzo",
-    provider: "CineStream",
-    sourceUrl: "https://v3-cinemeta.strem.io/meta/series/tt13433812.json"
+    id: "tt31158589",
+    title: "Don't Come Home",
+    provider: "CineStream"
   });
   assert.equal(plan.canResolveClientSide, false);
-  assert.equal(plan.requiresBackend, true);
   assert.equal(plan.provider, "CineStream");
+  assert.match(plan.reasons[0], /No browser-accessible stream source found/i);
 });
 
 test("resolveClientStream immediately resolves direct MP4 stream without backend", () => {

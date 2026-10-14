@@ -85,3 +85,44 @@ test("createStream bypasses backend when direct sourceUrl is present", async () 
   assert.equal(stream.mediaType, "mp4");
   assert.equal(stream.resolution.status, "direct_stream");
 });
+
+test("createStream resolves verified open titles client-side without backend", async () => {
+  const stream = await createStream("movie", "tt1254207", {
+    title: "Big Buck Bunny",
+    provider: "CineStream"
+  });
+
+  assert.equal(stream.status, "ready");
+  assert.equal(stream.streamMode, "client");
+  assert.equal(stream.mediaType, "webm");
+  assert.ok(stream.sourceUrl.includes("wikimedia.org"));
+});
+
+test("createStream rejects titles lacking browser-accessible stream without calling backend", async () => {
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => {
+    fetchCalled = true;
+    throw new Error("Backend should not be called");
+  };
+
+  try {
+    await assert.rejects(
+      async () => {
+        await createStream("series", "tt31158589", {
+          title: "Don't Come Home",
+          provider: "CineStream"
+        });
+      },
+      (err) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /No browser-accessible stream source found/i);
+        assert.equal(err.code, "NO_BROWSER_STREAM");
+        return true;
+      }
+    );
+    assert.equal(fetchCalled, false, "Backend /api/stream was not called");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

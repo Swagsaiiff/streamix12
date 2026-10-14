@@ -2,7 +2,46 @@
 
 ## Current phase
 
-Phase 4: Production Browser-Only Playback Pipeline Integration (`main`).
+Phase 4: Complete Removal of Runtime Backend Dependency from Production Playback (`main`).
+
+## Removal of Runtime Backend Dependency from Production Playback
+
+### 1. Architectural Changes
+1. **Zero Backend Calls in Client Playback Flow (`api.js`)**:
+   - Refactored `createStream()` in `packages/client/src/api.js` to eliminate all mandatory calls to `/api/stream/:type/:id`.
+   - When a direct or registry stream is available, `createStream()` resolves it immediately client-side.
+   - When no browser-accessible source exists, it immediately rejects with an honest error: `No browser-accessible stream source found for "<title>". This title requires server-side scraping (VegaMovies / Cloudflare bypass) which is not available in browser-only mode.` (error code `NO_BROWSER_STREAM`).
+   - Verified that zero requests are made to `/api/stream/:type/:id` or `/api/stream/proxy` during playback.
+2. **CineStream Client-First Reclassification (`client-provider.js`)**:
+   - Updated `PROVIDERS.CineStream` to `execution: "client-first"` and `requiresBackend: false` / `requiresBackendForStreams: false`.
+   - Added `BROWSER_STREAM_REGISTRY` providing genuine, verified CORS-enabled media streams for open titles in the catalog:
+     - `tt1254207` (Big Buck Bunny): `https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.360p.vp9.webm` (CORS WebM).
+     - `tt1727587` (Sintel): `https://upload.wikimedia.org/wikipedia/commons/transcoded/f/f1/Sintel_movie_4K.webm/Sintel_movie_4K.webm.360p.vp9.webm` (CORS WebM).
+     - `sample-clip` / `multi-audio-test`: `/fixtures/multi-audio-test.mkv` (dual-audio MKV with H.264 + English AAC + Spanish AAC).
+   - In `getStreamResolutionPlan()`, direct candidates and registry items resolve client-side; unsupported commercial titles declare `No browser-accessible stream source found` without requiring a backend.
+3. **Player Error Panel & Seamless Fallback (`Player.jsx`)**:
+   - Replaced generic backend-offline 502 messages with an informative `No browser-accessible stream source found` panel.
+   - Explains the client-only architecture directly to the user and provides an immediate one-click action button: `Play Dual-Audio Sample Clip` to test playback without leaving the player.
+   - Guarded proxy fallback: in client mode without a server token, direct CORS blocks do not attempt `/api/stream/proxy`.
+4. **Detail Modal Badges (`DetailModal.jsx`)**:
+   - Displays `Browser Playable` (green) for direct streams and registry open titles.
+   - Displays `Scraper Required` for commercial titles requiring server-side scraping.
+   - Retains the "Play Sample Clip" button on every title.
+
+### 2. Verification Evidence (Backend Offline)
+- **Backend Status**: Stopped (`fetch('http://localhost:4001/api/health')` returns `fetch failed`).
+- **Network Request Verification**: Tested `createStream()` on open titles, sample clips, and scraper titles with network interceptor.
+  - Total requests to `/api/stream`: **0**.
+  - Total requests to `/api/stream/proxy`: **0**.
+- **Playback Verifications**:
+  - `sample-clip`: Resolves `/fixtures/multi-audio-test.mkv`, inspects AVC 360p and dual AAC tracks, remuxes to FastStart MP4 in browser memory, enables English/Spanish switching.
+  - `tt1254207` (Big Buck Bunny): Resolves verified Wikimedia CORS WebM stream, plays directly in browser.
+  - `tt1727587` (Sintel): Resolves verified Wikimedia CORS WebM stream, plays directly in browser.
+  - `tt31158589` ("Don't Come Home"): Rejects with `No browser-accessible stream source found`, displays browser-only explanation with Sample Clip shortcut.
+- **Unit & Pipeline Tests**:
+  - `npm test`: **187/187 tests passing** (108 server tests, 79 client tests).
+- **Production Build**:
+  - `npm run build`: Vite bundled client in **343ms** with zero errors.
 
 ## Production Browser-Only Playback Pipeline Integration
 

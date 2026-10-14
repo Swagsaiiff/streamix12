@@ -184,7 +184,8 @@ export default function Player({ item, onClose, onProgress }) {
           episode: playItem.episode,
           sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.mediaUrl || playItem.url || playItem.sourceUrl) : undefined,
           streamUrl: playItem.streamUrl || playItem.mediaUrl || playItem.url,
-          mediaType: playItem.mediaType
+          mediaType: playItem.mediaType,
+          title: playItem.title
         });
 
         if (cancelled || opId !== operationIdRef.current) return;
@@ -226,8 +227,13 @@ export default function Player({ item, onClose, onProgress }) {
 
         let sourceUrl = rawSourceUrl;
 
-        // If direct fetch is blocked by CORS, use the secure backend media-proxy as transport layer
+        // If direct fetch is blocked by CORS, use the secure backend media-proxy if available
         if (probe.corsBlocked) {
+          if (stream.streamMode === "client" && !stream.proxyUrl) {
+            throw new Error(
+              "Media host blocks browser cross-origin requests (CORS). Direct client-side playback requires the media host to provide 'Access-Control-Allow-Origin: *'."
+            );
+          }
           const proxiedUrl = stream.proxyUrl || `/api/stream/proxy?url=${encodeURIComponent(rawSourceUrl)}`;
           let proxyProbe;
           try {
@@ -790,9 +796,47 @@ export default function Player({ item, onClose, onProgress }) {
       {phase === "error" && (
         <div className="player-center">
           <div className="player-error-panel" role="alert">
-            <h2>Playback error</h2>
+            <h2>{error && error.includes("No browser-accessible stream source found") ? "No browser-accessible stream source found" : "Playback error"}</h2>
             <p>{error}</p>
-            {error && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (
+            {error && error.includes("No browser-accessible stream source found") && (
+              <div
+                style={{
+                  marginTop: "0.85rem",
+                  padding: "0.75rem 1rem",
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.35)",
+                  borderRadius: "6px",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  lineHeight: "1.4"
+                }}
+              >
+                <strong style={{ color: "#93c5fd" }}>Browser-Only Architecture:</strong>
+                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
+                  STREAMIX is operating client-side without a backend server. Playback requires CORS-accessible media streams (MP4, WebM, HLS, DASH, or browser-supported MKV). Titles requiring server-side web scraping (VegaMovies / Cloudflare bypass) cannot be resolved without a backend. You can test client playback using the dual-audio Sample Clip or by providing a direct media URL.
+                </p>
+                <div style={{ marginTop: "0.65rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "0.35rem 0.75rem", fontSize: "0.8rem" }}
+                    onClick={() => {
+                      setCurrent((prev) => ({
+                        ...prev,
+                        title: `${prev.title || "Sample Clip"} (Sample Clip)`,
+                        streamUrl: "/fixtures/multi-audio-test.mkv",
+                        provider: "Direct",
+                        mediaType: "mkv"
+                      }));
+                      setAttempt((n) => n + 1);
+                    }}
+                  >
+                    Play Dual-Audio Sample Clip
+                  </button>
+                </div>
+              </div>
+            )}
+            {error && !error.includes("No browser-accessible") && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (
               <div
                 style={{
                   marginTop: "0.85rem",
