@@ -899,7 +899,35 @@ Live evidence for "Beast of War (2025)":
 - Catalog/search/detail flow used by STREAMIX is the CineStream main API port (cinemeta top catalogs, v3-cinemeta search, kitsu anime search, meta detail) — primary source, no TMDB dependency.
 - Playback blocker (exact step): `CineStreamProvider.loadLinks` → `invokeAllSources(...)` → dozens of host extractors (GDLink, GDFlix, febbox, akwam, levidia, ...). Each extractor performs multi-step page fetches with host-specific referer/UA/cookies, JSoup HTML parsing, and media-link extraction using CloudStream-only primitives (`app.get`, `document`, `newExtractorLink`). That Kotlin/Android-dependent pipeline is not ported; no direct, keyless media URL endpoint was validated this session. Fixture playback is clearly labeled in the API response (`provider.resolution=local_fixture`, `resolution.status=fixture_fallback`, note text) and shown in the player.
 
-## Remaining work
+## Task: Audio Language Selection in Movie/Series Details Modal
 
-1. Port the first permitted extractor path from `CineStreamExtractors.kt` (single host, validate a real media URL end-to-end), then flip `supportsStreamResolution`.
-2. Optional: per-endpoint search timeouts after collecting more latency data; browser-level UI QA.
+### Objective
+Provide an "Audio Language" selector in the Movie/Series Details Modal (similar to Netflix audio/dubbing options) that enables users to choose a preferred audio track (Original, English, Hindi, Tamil, Telugu, Spanish, French, Korean, German, Japanese) before clicking 'Play' or choosing an episode. The selected language is passed through to stream providers for audio-specific stream resolution and embed routing.
+
+### Changes Implemented
+1. **Catalog Metadata Integration (`packages/client/src/lib/tmdb-catalog.js`)**:
+   - Updated `normalizeTmdbItem` to preserve `original_language` and `language`.
+   - Updated `tmdbGetDetails` to extract and expose `original_language` and `spoken_languages` from TMDB metadata.
+2. **Details Modal Audio Selector UI (`packages/client/src/components/DetailModal.jsx`)**:
+   - Defined `POPULAR_LANGUAGES` (English, Hindi, Spanish, Korean, French, German, Japanese, Tamil, Telugu) and integrated `languageName()` helper.
+   - Built reactive `availableLanguages` list combining title's `original_language`, TMDB `spoken_languages`, and popular tracks without duplicates.
+   - Maintained user language preference with `localStorage` persistence (`streamix.lang`).
+   - Integrated `.modal-actions-bar` and sleek `.modal-lang-selector` dropdown beside the Play button in the hero section.
+   - Forwarded `selectedLanguage` and `lang` in all `onPlay` triggers (Hero Play, Episode Card click, and Error "Play Anyway").
+3. **Player & Stream Resolution (`packages/client/src/components/Player.jsx`)**:
+   - Initialized preferred language from item (`item.selectedLanguage || item.lang || localStorage.getItem("streamix.lang")`).
+   - Forwarded language selection to `discoverClientStream`, `buildWebEmbedUrl`, and `handleSelectEmbed`.
+4. **Provider Audio Handling (`packages/client/src/lib/source-providers/moviebox-source-provider.js`)**:
+   - Updated `buildWebEmbedUrl` to accept `selectedLanguage` / `lang` and append language query param (`?lang=${lang}`) for non-English audio dubs.
+   - Updated `MovieBoxSourceProvider.resolveStreams` to extract target language, match dub tracks in `details.dubs`, switch `targetSubjectId` if a language-specific dub exists, and propagate `selectedLanguage` to embed fallbacks.
+5. **Styling (`packages/client/src/index.css`)**:
+   - Styled `.modal-actions-bar`, `.modal-lang-selector`, `.modal-lang-label`, `.modal-lang-icon`, and `.modal-lang-dropdown` to match Netflix dark theme.
+6. **Tests (`packages/client/src/lib/stream-discovery.test.js`, `packages/client/src/lib/tmdb-catalog.test.js`)**:
+   - Added unit test coverage for `buildWebEmbedUrl` with language parameters (`?lang=hi`, `?lang=fr`).
+   - Added assertions for `original_language` and `spoken_languages` on TMDB details.
+
+### Verification (observed output)
+- `npm test` -> 88 passed, 0 failed.
+- `npm run build` -> Client bundle successfully built in 346ms.
+- Vite dev server running on `http://localhost:5173/` -> HTTP 200.
+

@@ -80,6 +80,8 @@ export function normalizeTmdbItem(item, explicitType = null) {
       : Array.isArray(item.genre_ids)
         ? item.genre_ids
         : null,
+    original_language: item.original_language || null,
+    language: item.original_language || null,
     provider: "TMDB",
     source: "TMDB"
   };
@@ -205,7 +207,9 @@ export async function tmdbGetDetails(type, id, options = {}) {
     status: data.status || null,
     tagline: data.tagline || null,
     numberOfSeasons: data.number_of_seasons || null,
-    numberOfEpisodes: data.number_of_episodes || null
+    numberOfEpisodes: data.number_of_episodes || null,
+    original_language: data.original_language || base.original_language || null,
+    spoken_languages: Array.isArray(data.spoken_languages) ? data.spoken_languages : []
   };
 
   if (!isSeries) {

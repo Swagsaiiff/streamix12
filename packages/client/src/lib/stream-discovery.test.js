@@ -26,12 +26,18 @@ test("MovieBoxSourceProvider is registered as primary provider in SourceDiscover
   assert.equal(moviebox.isAvailable(), true);
 });
 
-test("buildWebEmbedUrl constructs dynamic embed URLs using TMDB ID", () => {
+test("buildWebEmbedUrl constructs dynamic embed URLs using TMDB ID and respects audio language", () => {
   const movieEmbed = buildWebEmbedUrl({ tmdbId: 550, type: "movie" });
   assert.equal(movieEmbed, "https://vidsrc.to/embed/movie/550");
 
+  const movieEmbedHindi = buildWebEmbedUrl({ tmdbId: 550, type: "movie", selectedLanguage: "hi" });
+  assert.equal(movieEmbedHindi, "https://vidsrc.to/embed/movie/550?lang=hi");
+
   const tvEmbed = buildWebEmbedUrl({ tmdbId: 1399, type: "series", season: 2, episode: 5 });
   assert.equal(tvEmbed, "https://vidsrc.to/embed/tv/1399/2/5");
+
+  const tvEmbedFrench = buildWebEmbedUrl({ tmdbId: 1399, type: "series", season: 2, episode: 5, selectedLanguage: "fr" });
+  assert.equal(tvEmbedFrench, "https://vidsrc.to/embed/tv/1399/2/5?lang=fr");
 });
 
 test("MovieBoxSourceProvider falls back to Web Embed when direct stream is not found", async () => {

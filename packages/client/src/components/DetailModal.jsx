@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getStreamResolutionPlan } from "../lib/client-provider.js";
 import { tmdbGetSeasonEpisodes } from "../api.js";
+import { languageName } from "../lib/languages.js";
 
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+const POPULAR_LANGUAGES = [
+  { code: "en", name: "English" },
+  { code: "hi", name: "Hindi" },
+  { code: "es", name: "Spanish" },
+  { code: "ko", name: "Korean" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "ja", name: "Japanese" },
+  { code: "ta", name: "Tamil" },
+  { code: "te", name: "Telugu" }
+];
 
 function MetaItem({ label, value }) {
   if (!value) return null;
@@ -23,6 +36,40 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
   const [selectedSeason, setSelectedSeason] = useState(null);
   const [seasonEpisodesCache, setSeasonEpisodesCache] = useState({});
   const [loadingSeason, setLoadingSeason] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState(() => {
+    return localStorage.getItem("streamix.lang") || "en";
+  });
+
+  const availableLanguages = useMemo(() => {
+    const map = new Map();
+
+    const orig = detail?.original_language || item?.original_language;
+    if (orig) {
+      const origCode = String(orig).toLowerCase();
+      const origName = languageName(origCode) || origCode.toUpperCase();
+      map.set(origCode, { code: origCode, name: `${origName} (Original)` });
+    }
+
+    const spoken = detail?.spoken_languages || [];
+    if (Array.isArray(spoken)) {
+      for (const sp of spoken) {
+        const code = (sp.iso_639_1 || "").toLowerCase();
+        if (!code) continue;
+        if (!map.has(code)) {
+          const name = sp.english_name || sp.name || languageName(code) || code.toUpperCase();
+          map.set(code, { code, name });
+        }
+      }
+    }
+
+    for (const pop of POPULAR_LANGUAGES) {
+      if (!map.has(pop.code)) {
+        map.set(pop.code, pop);
+      }
+    }
+
+    return Array.from(map.values());
+  }, [detail, item]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -192,22 +239,69 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                 ))}
               </div>
               {state === "done" && (
-                <div className="modal-actions">
-                  <button
-                    className="btn btn-play"
-                    onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}) })}
-                    title={resumeInfo ? `Resume from ${Math.floor(resumeInfo.position / 60)}m` : "Play"}
-                  >
-                    {resumeInfo ? "Resume" : "Play"}
-                  </button>
-                  {resumeInfo && (
+                <div className="modal-actions-bar">
+                  <div className="modal-actions">
                     <button
-                      className="btn btn-secondary"
-                      onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}) , restart: true })}
+                      className="btn btn-play"
+                      onClick={() =>
+                        onPlay?.({
+                          ...(item || {}),
+                          ...(detail || {}),
+                          selectedLanguage,
+                          lang: selectedLanguage
+                        })
+                      }
+                      title={resumeInfo ? `Resume from ${Math.floor(resumeInfo.position / 60)}m` : "Play"}
                     >
-                      Start over
+                      {resumeInfo ? "Resume" : "Play"}
                     </button>
-                  )}
+                    {resumeInfo && (
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() =>
+                          onPlay?.({
+                            ...(item || {}),
+                            ...(detail || {}),
+                            selectedLanguage,
+                            lang: selectedLanguage,
+                            restart: true
+                          })
+                        }
+                      >
+                        Start over
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="modal-lang-selector" title="Choose Preferred Audio Language">
+                    <label htmlFor="modal-audio-lang" className="modal-lang-label">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                      </svg>
+                      <span>Audio:</span>
+                    </label>
+                    <select
+                      id="modal-audio-lang"
+                      className="modal-lang-dropdown"
+                      value={selectedLanguage}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSelectedLanguage(val);
+                        try {
+                          localStorage.setItem("streamix.lang", val);
+                        } catch {}
+                      }}
+                      aria-label="Select audio language"
+                    >
+                      {availableLanguages.map((l) => (
+                        <option key={l.code} value={l.code}>
+                          {l.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               )}
             </div>
@@ -227,7 +321,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
               <p>Failed to load title details.</p>
               <button
                 className="btn btn-play"
-                onClick={() => onPlay?.(item)}
+                onClick={() => onPlay?.({ ...(item || {}), selectedLanguage, lang: selectedLanguage })}
               >
                 Play Anyway
               </button>
@@ -292,7 +386,9 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                                     season: ep.season,
                                     episode: ep.episode,
                                     episodeTitle: ep.name ?? null,
-                                    poster: ep.thumbnail ?? item.poster
+                                    poster: ep.thumbnail ?? item.poster,
+                                    selectedLanguage,
+                                    lang: selectedLanguage
                                   })
                                 }
                               >

@@ -1500,10 +1500,69 @@ body {
   color: #93c5fd;
 }
 
+.modal-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
 .modal-actions {
   display: flex;
   gap: 0.6rem;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.modal-lang-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--sx-line);
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+}
+
+.modal-lang-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--sx-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.modal-lang-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.modal-lang-dropdown {
+  background: rgba(18, 18, 24, 0.95);
+  color: var(--sx-text);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.modal-lang-dropdown:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.modal-lang-dropdown:focus {
+  border-color: var(--sx-accent, #e50914);
+  box-shadow: 0 0 0 2px rgba(229, 9, 20, 0.25);
 }
 
 .btn-secondary {

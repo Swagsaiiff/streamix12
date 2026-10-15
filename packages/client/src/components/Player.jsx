@@ -82,7 +82,7 @@ export default function Player({ item, onClose, onProgress }) {
   const [activeQualityLabel, setActiveQualityLabel] = useState(null);
   const [subtitles, setSubtitles] = useState([]);
   const [activeSubtitle, setActiveSubtitle] = useState("off");
-  const [preferredLang, setPreferredLang] = useState(() => localStorage.getItem("streamix.lang") || "");
+  const [preferredLang, setPreferredLang] = useState(() => item?.selectedLanguage || item?.lang || localStorage.getItem("streamix.lang") || "");
   const [fullscreen, setFullscreen] = useState(false);
   const [sourceNote, setSourceNote] = useState(null);
   const [sourceStatus, setSourceStatus] = useState(null);
@@ -100,7 +100,8 @@ export default function Player({ item, onClose, onProgress }) {
         tmdbId,
         type: item.type,
         season: item.season,
-        episode: item.episode
+        episode: item.episode,
+        selectedLanguage: item.selectedLanguage || item.lang || localStorage.getItem("streamix.lang") || ""
       });
     }
     return null;
@@ -168,26 +169,34 @@ export default function Player({ item, onClose, onProgress }) {
     const season = current.season ?? 1;
     const episode = current.episode ?? 1;
 
+    const lang = (current.selectedLanguage || current.lang || preferredLang || "").toLowerCase().trim();
     let embedUrl = null;
     if (tmdbId) {
-      embedUrl = isSeries
-        ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
-        : `https://vidsrc.to/embed/movie/${tmdbId}`;
+      embedUrl = buildWebEmbedUrl({
+        tmdbId,
+        type: current.type,
+        season,
+        episode,
+        selectedLanguage: lang
+      });
     } else if (current.imdbId) {
+      const langParam = lang && lang !== "en" && lang !== "original" ? `?lang=${encodeURIComponent(lang)}` : "";
       embedUrl = isSeries
-        ? `https://vidsrc.to/embed/tv/${current.imdbId}/${season}/${episode}`
-        : `https://vidsrc.to/embed/movie/${current.imdbId}`;
+        ? `https://vidsrc.to/embed/tv/${current.imdbId}/${season}/${episode}${langParam}`
+        : `https://vidsrc.to/embed/movie/${current.imdbId}${langParam}`;
     } else {
       embedUrl = buildWebEmbedUrl({
         tmdbId,
         type: current.type,
         season,
-        episode
+        episode,
+        selectedLanguage: lang
       });
     }
 
     if (!embedUrl) {
-      embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${current.id}${isSeries ? `/${season}/${episode}` : ""}`;
+      const langParam = lang && lang !== "en" && lang !== "original" ? `?lang=${encodeURIComponent(lang)}` : "";
+      embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${current.id}${isSeries ? `/${season}/${episode}` : ""}${langParam}`;
     }
 
     if (videoRef.current) {
@@ -274,6 +283,7 @@ export default function Player({ item, onClose, onProgress }) {
         const season = playItem.season ?? 1;
         const episode = playItem.episode ?? 1;
 
+        const lang = (playItem.selectedLanguage || playItem.lang || preferredLang || "").toLowerCase().trim();
         let embedUrl = null;
         if (
           playItem.streamUrl &&
@@ -285,24 +295,31 @@ export default function Player({ item, onClose, onProgress }) {
         ) {
           embedUrl = playItem.streamUrl;
         } else if (tmdbId) {
-          embedUrl = isSeries
-            ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
-            : `https://vidsrc.to/embed/movie/${tmdbId}`;
+          embedUrl = buildWebEmbedUrl({
+            tmdbId,
+            type: playItem.type,
+            season,
+            episode,
+            selectedLanguage: lang
+          });
         } else if (playItem.imdbId) {
+          const langParam = lang && lang !== "en" && lang !== "original" ? `?lang=${encodeURIComponent(lang)}` : "";
           embedUrl = isSeries
-            ? `https://vidsrc.to/embed/tv/${playItem.imdbId}/${season}/${episode}`
-            : `https://vidsrc.to/embed/movie/${playItem.imdbId}`;
+            ? `https://vidsrc.to/embed/tv/${playItem.imdbId}/${season}/${episode}${langParam}`
+            : `https://vidsrc.to/embed/movie/${playItem.imdbId}${langParam}`;
         } else {
           embedUrl = buildWebEmbedUrl({
             tmdbId,
             type: playItem.type,
             season,
-            episode
+            episode,
+            selectedLanguage: lang
           });
         }
 
         if (!embedUrl) {
-          embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${playItem.id}${isSeries ? `/${season}/${episode}` : ""}`;
+          const langParam = lang && lang !== "en" && lang !== "original" ? `?lang=${encodeURIComponent(lang)}` : "";
+          embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${playItem.id}${isSeries ? `/${season}/${episode}` : ""}${langParam}`;
         }
 
         setPlaybackMode("embed");
@@ -345,11 +362,13 @@ export default function Player({ item, onClose, onProgress }) {
             streamUrl: playItem.streamUrl || playItem.mediaUrl || playItem.url,
             sourceUrl: hasExplicitDirectStream ? (playItem.streamUrl || playItem.mediaUrl || playItem.url || playItem.sourceUrl) : undefined,
             mediaType: playItem.mediaType,
-            provider: playItem.provider
+            provider: playItem.provider,
+            selectedLanguage: playItem.selectedLanguage || playItem.lang || preferredLang,
+            lang: playItem.selectedLanguage || playItem.lang || preferredLang
           },
           {
             signal: controller.signal,
-            lang: preferredLang || undefined,
+            lang: playItem.selectedLanguage || playItem.lang || preferredLang || undefined,
             mediaType: playItem.mediaType
           }
         );

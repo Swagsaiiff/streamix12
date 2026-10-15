@@ -6,15 +6,18 @@ import {
   cleanMovieboxTitle
 } from "../moviebox/index.js";
 
-export function buildWebEmbedUrl({ tmdbId, type = "movie", season = 1, episode = 1 }) {
+export function buildWebEmbedUrl({ tmdbId, type = "movie", season = 1, episode = 1, selectedLanguage, lang }) {
   if (!tmdbId) return null;
   const isSeries = type === "series" || type === "tv";
+  const s = season || 1;
+  const ep = episode || 1;
+  const language = (selectedLanguage || lang || "").toLowerCase().trim();
+  const langParam = language && language !== "en" && language !== "original" ? `?lang=${encodeURIComponent(language)}` : "";
+
   if (isSeries) {
-    const s = season || 1;
-    const ep = episode || 1;
-    return `https://vidsrc.to/embed/tv/${tmdbId}/${s}/${ep}`;
+    return `https://vidsrc.to/embed/tv/${tmdbId}/${s}/${ep}${langParam}`;
   }
-  return `https://vidsrc.to/embed/movie/${tmdbId}`;
+  return `https://vidsrc.to/embed/movie/${tmdbId}${langParam}`;
 }
 
 export class MovieBoxSourceProvider extends BaseSourceProvider {
@@ -35,6 +38,7 @@ export class MovieBoxSourceProvider extends BaseSourceProvider {
     const seasonNum = query.season != null ? Number(query.season) : 0;
     const episodeNum = query.episode != null ? Number(query.episode) : 0;
     const itemType = query.type === "series" || query.type === "tv" ? "series" : "movie";
+    const targetLang = (query.selectedLanguage || query.lang || options.lang || "").toLowerCase().trim();
 
     let subjectId = null;
 
@@ -81,8 +85,21 @@ export class MovieBoxSourceProvider extends BaseSourceProvider {
           // details optional
         }
 
+        let targetSubjectId = subjectId;
+        if (targetLang && details?.dubs && details.dubs.length > 0) {
+          const matchDub = details.dubs.find(
+            (d) =>
+              d.language?.toLowerCase().startsWith(targetLang) ||
+              d.label?.toLowerCase().includes(targetLang)
+          );
+          if (matchDub?.subjectId) {
+            targetSubjectId = matchDub.subjectId;
+            diagnostics.push(`Switching to MovieBox dubbed subjectId ${targetSubjectId} for audio language "${targetLang}"`);
+          }
+        }
+
         const resolved = await movieboxResolveStreams({
-          subjectId,
+          subjectId: targetSubjectId,
           season: seasonNum,
           episode: episodeNum,
           details,
@@ -122,7 +139,8 @@ export class MovieBoxSourceProvider extends BaseSourceProvider {
         tmdbId,
         type: itemType,
         season: seasonNum || 1,
-        episode: episodeNum || 1
+        episode: episodeNum || 1,
+        selectedLanguage: targetLang
       });
 
       if (embedUrl) {

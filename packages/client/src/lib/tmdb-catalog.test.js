@@ -89,10 +89,12 @@ test("tmdbGetTrendingMovies returns real trending movies from TMDB API", async (
   assert.equal(items[0].provider, "TMDB");
 });
 
-test("tmdbGetDetails returns real movie metadata with external IDs", async () => {
+test("tmdbGetDetails returns real movie metadata with external IDs and language tracks", async () => {
   const item = await tmdbGetDetails("movie", 550);
   assert.equal(item.title, "Fight Club");
   assert.equal(item.tmdbId, 550);
   assert.equal(item.imdbId, "tt0137523");
+  assert.equal(item.original_language, "en");
+  assert.ok(Array.isArray(item.spoken_languages));
   assert.ok(Array.isArray(item.genres));
 });
