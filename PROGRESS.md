@@ -2,9 +2,29 @@
 
 ## Current phase
 
-Phase 5: Frontend-Only MovieBox-Tui Provider & React HLS Player Integration (`main`).
+Phase 5: Frontend-Only TMDB Catalog & MovieBox/Web Embed Streaming (`main`).
 
-## Frontend-Only MovieBox-Tui Provider & React HLS Player Integration
+## Web Embed Stream Iframe Rendering & Source Switcher Fix
+
+### 1. Architectural & Component Fixes
+- **Embed vs Direct Source Detection (`Player.jsx`)**:
+  - Distinguishes between direct media streams (`.m3u8`, `.mp4`) and webpage embed stream URLs (e.g. `vidsrc.to`, `multiembed`, `autoembed`).
+  - Embed detection runs before HTML5 `<video>` reference checks, preventing unmounted ref errors from aborting stream initialization.
+  - When in embed mode or `forceEmbed: true`, builds the embed URL directly and sets `phase = "ready"` immediately.
+- **Conditional Responsive Player UI (`Player.jsx`)**:
+  - Direct Media: Renders standard custom video player `<video ref={videoRef}>` with `hls.js`, multi-audio, and quality selectors.
+  - Web Embed Stream: Hides `<video>` and renders a responsive `<iframe>` with `allow="autoplay; encrypted-media; picture-in-picture"` and `allowFullScreen`.
+  - Big Play Overlay & Controls: Suppressed when `playbackMode === "embed"` (`player-big-play` and `player-bottom` are hidden) so clicks/touches directly interact with the embed player without blocking overlays.
+- **Top-Right Source Switcher Pills (`Player.jsx` & `index.css`)**:
+  - Added interactive pill buttons in `player-top` allowing instant toggling between "Client Direct" (MovieBox HLS) and "Web Embed Stream" (VidSrc TMDB embed).
+  - Toggling immediately pauses any HTML5 playback, updates player state, and builds the target stream URL with `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}` or `https://vidsrc.to/embed/movie/${tmdbId}`.
+  - Added one-click "Play via Web Embed Stream" action to the Player error panel for immediate fallback.
+  - Preserved Netflix-style layout, title overlay ("FROM — S01E01"), and back button navigation.
+
+### 2. Verification Evidence
+- `npm run build`: Bundled Vite client in **383ms** with zero errors.
+- `npm test`: **88/88 tests passed** with zero failures across the workspace.
+- Dev Server: Running at `http://localhost:5173/` responding with HTTP 200.
 
 ### 1. Purged Old Backend & Vegamovies Logic
 - **Deleted Scrapers & Server Transcoding**:

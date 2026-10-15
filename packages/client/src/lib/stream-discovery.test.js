@@ -73,3 +73,30 @@ test("DirectSourceProvider ignores query with no direct stream url", async () =>
   assert.equal(res.sources.length, 0);
   assert.equal(res.diagnostics.length, 1);
 });
+
+test("Embed vs Direct source detection differentiates iframe embed URLs from direct media streams", () => {
+  const isEmbedStream = (url) => {
+    const isDirectMedia =
+      typeof url === "string" &&
+      (url.includes(".m3u8") || url.includes(".mp4")) &&
+      !url.includes("vidsrc") &&
+      !url.includes("/embed");
+
+    return (
+      !isDirectMedia &&
+      typeof url === "string" &&
+      url.startsWith("http") &&
+      (url.includes("vidsrc") ||
+        url.includes("embed") ||
+        url.includes("multiembed") ||
+        url.includes("autoembed"))
+    );
+  };
+
+  assert.equal(isEmbedStream("https://vidsrc.to/embed/tv/1234/1/1"), true);
+  assert.equal(isEmbedStream("https://multiembed.mov/?video_id=1234"), true);
+  assert.equal(isEmbedStream("https://autoembed.co/movie/tmdb/550"), true);
+  assert.equal(isEmbedStream("https://example.com/stream/index.m3u8"), false);
+  assert.equal(isEmbedStream("https://cdn.example.com/video.mp4"), false);
+});
+

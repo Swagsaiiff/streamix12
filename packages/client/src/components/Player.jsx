@@ -14,6 +14,7 @@ import { inspectMatroska, browserSupportFor } from "../poc/mkv-inspect.js";
 import { remuxMkv, remuxMkvToMp4, inspectMkvSource, terminateLibav } from "../poc/client-remux.js";
 import { probeMediaSource, detectFormatFromUrl } from "../lib/source-detector.js";
 import { movieboxResolveStreams, movieboxGetDetails } from "../lib/moviebox/index.js";
+import { buildWebEmbedUrl } from "../lib/source-providers/moviebox-source-provider.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const HIDE_DELAY_MS = 3000;
@@ -86,8 +87,24 @@ export default function Player({ item, onClose, onProgress }) {
   const [sourceNote, setSourceNote] = useState(null);
   const [sourceStatus, setSourceStatus] = useState(null);
   const [sourceProvider, setSourceProvider] = useState(null);
-  const [playbackMode, setPlaybackMode] = useState("direct");
-  const [embedStreamUrl, setEmbedStreamUrl] = useState(null);
+  const [playbackMode, setPlaybackMode] = useState(() => (item?.forceEmbed || item?.isEmbed || item?.mediaType === "embed" ? "embed" : "direct"));
+  const [sourceMode, setSourceMode] = useState(() => (item?.forceEmbed || item?.isEmbed || item?.mediaType === "embed" ? "embed" : "direct"));
+  const [embedStreamUrl, setEmbedStreamUrl] = useState(() => {
+    if (item?.forceEmbed || item?.isEmbed || item?.mediaType === "embed") {
+      const rawUrl = item.streamUrl || item.mediaUrl || item.url || item.sourceUrl;
+      if (rawUrl && typeof rawUrl === "string" && rawUrl.startsWith("http")) {
+        return rawUrl;
+      }
+      const tmdbId = item.tmdbId || (typeof item.id === "number" || /^\d{1,9}$/.test(String(item.id)) ? Number(item.id) : null);
+      return buildWebEmbedUrl({
+        tmdbId,
+        type: item.type,
+        season: item.season,
+        episode: item.episode
+      });
+    }
+    return null;
+  });
   const [controlsVisible, setControlsVisible] = useState(true);
   const [resumedFrom, setResumedFrom] = useState(null);
   const [ended, setEnded] = useState(false);
@@ -137,6 +154,73 @@ export default function Player({ item, onClose, onProgress }) {
     currentRef.current = current;
   }, [current]);
 
+  const handleSelectEmbed = useCallback(() => {
+    setSourceMode("embed");
+    const tmdbId =
+      current.tmdbId ||
+      (typeof current.id === "number" || /^\d{1,9}$/.test(String(current.id))
+        ? Number(current.id)
+        : null);
+
+    const isSeries =
+      current.type === "series" ||
+      (current.season != null && current.episode != null);
+    const season = current.season ?? 1;
+    const episode = current.episode ?? 1;
+
+    let embedUrl = null;
+    if (tmdbId) {
+      embedUrl = isSeries
+        ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
+        : `https://vidsrc.to/embed/movie/${tmdbId}`;
+    } else if (current.imdbId) {
+      embedUrl = isSeries
+        ? `https://vidsrc.to/embed/tv/${current.imdbId}/${season}/${episode}`
+        : `https://vidsrc.to/embed/movie/${current.imdbId}`;
+    } else {
+      embedUrl = buildWebEmbedUrl({
+        tmdbId,
+        type: current.type,
+        season,
+        episode
+      });
+    }
+
+    if (!embedUrl) {
+      embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${current.id}${isSeries ? `/${season}/${episode}` : ""}`;
+    }
+
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.src = "";
+      } catch {
+        // ignore
+      }
+    }
+    if (activeBlobUrlRef.current) {
+      URL.revokeObjectURL(activeBlobUrlRef.current);
+      activeBlobUrlRef.current = null;
+    }
+
+    setPlaybackMode("embed");
+    setEmbedStreamUrl(embedUrl);
+    setSourceStatus("embed_stream");
+    setSourceProvider("Web Embed");
+    setSourceNote("Web Embed Stream (vidsrc.to)");
+    setPhase("ready");
+    setError(null);
+  }, [current]);
+
+  const handleSelectDirect = useCallback(() => {
+    setSourceMode("direct");
+    setPlaybackMode("direct");
+    setEmbedStreamUrl(null);
+    setPhase("resolving");
+    setError(null);
+    setAttempt((prev) => prev + 1);
+  }, []);
+
   const bumpControls = useCallback(() => {
     setControlsVisible(true);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -170,6 +254,65 @@ export default function Player({ item, onClose, onProgress }) {
     const opId = ++operationIdRef.current;
 
     async function start() {
+      if (sourceMode === "embed" || playItem.forceEmbed) {
+        setPhase("ready");
+        setError(null);
+        setEnded(false);
+        setResumedFrom(null);
+        setSourceDiagnostics([]);
+        setSourceLimitation(null);
+        cleanupActiveMedia();
+
+        const tmdbId =
+          playItem.tmdbId ||
+          (typeof playItem.id === "number" || /^\d{1,9}$/.test(String(playItem.id))
+            ? Number(playItem.id)
+            : null);
+        const isSeries =
+          playItem.type === "series" ||
+          (playItem.season != null && playItem.episode != null);
+        const season = playItem.season ?? 1;
+        const episode = playItem.episode ?? 1;
+
+        let embedUrl = null;
+        if (
+          playItem.streamUrl &&
+          typeof playItem.streamUrl === "string" &&
+          (playItem.streamUrl.includes("vidsrc") ||
+            playItem.streamUrl.includes("embed") ||
+            playItem.streamUrl.includes("multiembed") ||
+            playItem.streamUrl.includes("autoembed"))
+        ) {
+          embedUrl = playItem.streamUrl;
+        } else if (tmdbId) {
+          embedUrl = isSeries
+            ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`
+            : `https://vidsrc.to/embed/movie/${tmdbId}`;
+        } else if (playItem.imdbId) {
+          embedUrl = isSeries
+            ? `https://vidsrc.to/embed/tv/${playItem.imdbId}/${season}/${episode}`
+            : `https://vidsrc.to/embed/movie/${playItem.imdbId}`;
+        } else {
+          embedUrl = buildWebEmbedUrl({
+            tmdbId,
+            type: playItem.type,
+            season,
+            episode
+          });
+        }
+
+        if (!embedUrl) {
+          embedUrl = `https://vidsrc.to/embed/${isSeries ? "tv" : "movie"}/${playItem.id}${isSeries ? `/${season}/${episode}` : ""}`;
+        }
+
+        setPlaybackMode("embed");
+        setEmbedStreamUrl(embedUrl);
+        setSourceStatus("embed_stream");
+        setSourceProvider("Web Embed");
+        setSourceNote("Web Embed Stream (vidsrc.to)");
+        return;
+      }
+
       setPhase("resolving");
       setError(null);
       setEnded(false);
@@ -234,6 +377,45 @@ export default function Player({ item, onClose, onProgress }) {
           setSubtitles([]);
         }
 
+        const rawSourceUrl = stream.sourceUrl;
+
+        if (!rawSourceUrl) {
+          throw new Error("No playable media URL returned for this source");
+        }
+
+        // 1. EMBED VS DIRECT SOURCE DETECTION
+        const isDirectMedia =
+          typeof rawSourceUrl === "string" &&
+          (rawSourceUrl.includes(".m3u8") || rawSourceUrl.includes(".mp4")) &&
+          !rawSourceUrl.includes("vidsrc") &&
+          !rawSourceUrl.includes("/embed");
+
+        const isEmbedStream =
+          sourceMode === "embed" ||
+          Boolean(stream.isEmbed) ||
+          stream.mediaType === "embed" ||
+          playItem.forceEmbed ||
+          (!isDirectMedia &&
+            typeof rawSourceUrl === "string" &&
+            rawSourceUrl.startsWith("http") &&
+            (rawSourceUrl.includes("vidsrc") ||
+              rawSourceUrl.includes("embed") ||
+              rawSourceUrl.includes("multiembed") ||
+              rawSourceUrl.includes("autoembed")));
+
+        if (isEmbedStream) {
+          setPlaybackMode("embed");
+          setEmbedStreamUrl(rawSourceUrl);
+          setSourceStatus("embed_stream");
+          setSourceProvider(stream.provider?.name || "Web Embed");
+          setSourceNote(stream.note || "Web Embed Stream (vidsrc.to)");
+          setPhase("ready");
+          return;
+        }
+
+        setPlaybackMode("direct");
+        setEmbedStreamUrl(null);
+
         const video = videoRef.current;
         if (!video) return;
 
@@ -249,22 +431,6 @@ export default function Player({ item, onClose, onProgress }) {
         });
         savedResumeRef.current = saved;
         resumeAppliedRef.current = false;
-
-        const rawSourceUrl = stream.sourceUrl;
-
-        if (!rawSourceUrl) {
-          throw new Error("No playable media URL returned for this source");
-        }
-
-        // Web Embed fallback handling (renders via iframe)
-        if (stream.isEmbed || stream.mediaType === "embed" || rawSourceUrl.includes("/embed/")) {
-          setPlaybackMode("embed");
-          setEmbedStreamUrl(rawSourceUrl);
-          setPhase("ready");
-          return;
-        }
-
-        setEmbedStreamUrl(null);
 
         // Probe media source to inspect response, status, content-type and initial bytes
         let probe = await probeMediaSource(rawSourceUrl, {
@@ -938,7 +1104,7 @@ export default function Player({ item, onClose, onProgress }) {
         : (qualityInfo.real.find((level) => level.value === activeLevel)?.label ?? "Auto");
   const displayTitle =
     current.type === "series" && current.season != null && current.episode != null
-      ? `${current.title} — S${current.season}E${current.episode}${current.episodeTitle ? ` · ${current.episodeTitle}` : ""}`
+      ? `${current.title} — S${String(current.season).padStart(2, "0")}E${String(current.episode).padStart(2, "0")}${current.episodeTitle ? ` · ${current.episodeTitle}` : ""}`
       : current.title;
 
   return (
@@ -954,11 +1120,11 @@ export default function Player({ item, onClose, onProgress }) {
       {playbackMode === "embed" && embedStreamUrl ? (
         <iframe
           src={embedStreamUrl}
-          className="player-video player-embed-iframe"
+          className="w-full h-full border-0 player-embed-iframe"
           title={`Playing ${displayTitle}`}
           allowFullScreen
-          allow="autoplay; encrypted-media; fullscreen"
-          style={{ width: "100%", height: "100%", border: "none", background: "#000" }}
+          allow="autoplay; encrypted-media; picture-in-picture"
+          style={{ width: "100%", height: "100%", border: 0, position: "absolute", inset: 0, background: "#000" }}
         />
       ) : (
         <video ref={videoRef} className="player-video" playsInline onClick={togglePlay} onDoubleClick={toggleFullscreen} />
@@ -1038,7 +1204,10 @@ export default function Player({ item, onClose, onProgress }) {
               </div>
             )}
             <div className="player-error-actions">
-              <button type="button" className="player-btn player-btn-primary" onClick={retry}>
+              <button type="button" className="player-btn player-btn-primary" onClick={handleSelectEmbed}>
+                Play via Web Embed Stream
+              </button>
+              <button type="button" className="player-btn" onClick={retry}>
                 Retry
               </button>
               <button type="button" className="player-btn" onClick={onClose}>
@@ -1058,19 +1227,27 @@ export default function Player({ item, onClose, onProgress }) {
             <span className="player-title" title={displayTitle}>
               {displayTitle}
             </span>
+            <div className="player-source-pills" role="tablist" aria-label="Stream Source Selection">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={playbackMode !== "embed"}
+                className={`player-pill-btn ${playbackMode !== "embed" ? "active" : ""}`}
+                onClick={handleSelectDirect}
+              >
+                Client Direct
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={playbackMode === "embed"}
+                className={`player-pill-btn ${playbackMode === "embed" ? "active embed" : ""}`}
+                onClick={handleSelectEmbed}
+              >
+                Web Embed Stream
+              </button>
+            </div>
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
-            {sourceStatus === "direct_stream" && <span className="player-live-badge" style={{ background: "#059669" }}>Client Direct</span>}
-            {playbackMode === "embed" && (
-              <span className="player-live-badge" style={{ background: "#8b5cf6" }}>Web Embed Stream</span>
-            )}
-            {playbackMode === "client-remux" && (
-              <span className="player-test-badge" style={{ background: "rgba(16, 185, 129, 0.2)", color: "#6ee7b7", border: "1px solid rgba(16, 185, 129, 0.4)" }}>
-                FastStart MP4 Remux
-              </span>
-            )}
-            {sourceStatus === "provider_stream" && (
-              <span className="player-live-badge">{sourceProvider ? `Backend · ${sourceProvider}` : "Backend Resolved"}</span>
-            )}
             {sourceNote && (
               <span className="player-source" title={sourceNote}>
                 {sourceNote}
@@ -1078,7 +1255,7 @@ export default function Player({ item, onClose, onProgress }) {
             )}
           </div>
 
-          {phase === "ready" && !playing && !ended && (
+          {playbackMode !== "embed" && phase === "ready" && !playing && !ended && (
             <button type="button" className="player-big-play" onClick={togglePlay} aria-label="Play">
               <span className="player-big-play-icon" aria-hidden="true">
                 ▶
@@ -1106,159 +1283,161 @@ export default function Player({ item, onClose, onProgress }) {
             </div>
           )}
 
-          <div className="player-bottom" onClick={(e) => e.stopPropagation()}>
-            <div className="player-timeline">
-              <input
-                type="range"
-                className="player-seek"
-                min="0"
-                max={duration || 0}
-                step="0.1"
-                value={Math.min(currentTime, duration || 0)}
-                onChange={(e) => seekTo(e.target.value)}
-                aria-label="Seek"
-                style={{ "--played": `${progress}%`, "--buffered": `${bufferedPct}%` }}
-              />
-              <div className="player-time">
-                <span>{formatTime(currentTime)}</span>
-                <span>{formatTime(duration)}</span>
-              </div>
-            </div>
-
-            <div className="player-controls">
-              <button type="button" className="player-btn" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
-                {playing ? "❚❚" : "▶"}
-              </button>
-              <button type="button" className="player-btn" onClick={() => skip(-10)} aria-label="Seek back 10 seconds">
-                ⟲ 10
-              </button>
-              <button type="button" className="player-btn" onClick={() => skip(10)} aria-label="Seek forward 10 seconds">
-                10 ⟳
-              </button>
-
-              <div className="player-volume">
-                <button type="button" className="player-btn" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"}>
-                  {muted || volume === 0 ? "🔇" : "🔊"}
-                </button>
+          {playbackMode !== "embed" && (
+            <div className="player-bottom" onClick={(e) => e.stopPropagation()}>
+              <div className="player-timeline">
                 <input
                   type="range"
+                  className="player-seek"
                   min="0"
-                  max="1"
-                  step="0.05"
-                  value={muted ? 0 : volume}
-                  onChange={(e) => changeVolume(e.target.value)}
-                  aria-label="Volume"
-                  style={{ "--played": `${(muted ? 0 : volume) * 100}%` }}
+                  max={duration || 0}
+                  step="0.1"
+                  value={Math.min(currentTime, duration || 0)}
+                  onChange={(e) => seekTo(e.target.value)}
+                  aria-label="Seek"
+                  style={{ "--played": `${progress}%`, "--buffered": `${bufferedPct}%` }}
                 />
+                <div className="player-time">
+                  <span>{formatTime(currentTime)}</span>
+                  <span>{formatTime(duration)}</span>
+                </div>
               </div>
 
-              <div className="player-spacer" />
+              <div className="player-controls">
+                <button type="button" className="player-btn" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
+                  {playing ? "❚❚" : "▶"}
+                </button>
+                <button type="button" className="player-btn" onClick={() => skip(-10)} aria-label="Seek back 10 seconds">
+                  ⟲ 10
+                </button>
+                <button type="button" className="player-btn" onClick={() => skip(10)} aria-label="Seek forward 10 seconds">
+                  10 ⟳
+                </button>
 
-              {audioTracks.length > 0 && (
+                <div className="player-volume">
+                  <button type="button" className="player-btn" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"}>
+                    {muted || volume === 0 ? "🔇" : "🔊"}
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={muted ? 0 : volume}
+                    onChange={(e) => changeVolume(e.target.value)}
+                    aria-label="Volume"
+                    style={{ "--played": `${(muted ? 0 : volume) * 100}%` }}
+                  />
+                </div>
+
+                <div className="player-spacer" />
+
+                {audioTracks.length > 0 && (
+                  <label className="player-select">
+                    <span>Audio</span>
+                    <select
+                      value={activeTrack ?? audioTracks[0]?.id ?? ""}
+                      onChange={(e) => selectAudio(e.target.value)}
+                      aria-label="Audio track"
+                    >
+                      {audioTracks.map((track) => (
+                        <option key={track.id} value={track.id}>
+                          {audioTrackLabel(track)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {streamQualities.length > 1 ? (
+                  <label className="player-select" title="Choose video quality">
+                    <span>Quality</span>
+                    <select
+                      value={activeQualityLabel || streamQualities[0]?.label || "Auto"}
+                      onChange={(e) => selectQuality(e.target.value)}
+                      aria-label="Video quality"
+                    >
+                      <option value="Auto">Auto</option>
+                      {streamQualities.map((q) => (
+                        <option key={q.label} value={q.label}>
+                          {q.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : qualityInfo.single ? (
+                  <span className="player-quality-static" title={qualityNote ?? "Single quality source"}>
+                    <span className="player-quality-label">Quality</span>
+                    <span className="player-quality-value">{qualityLabel}</span>
+                  </span>
+                ) : (
+                  <label className="player-select" title={qualityNote ?? "Choose video quality"}>
+                    <span>Quality</span>
+                    <select
+                      value={activeLevel}
+                      onChange={(e) => selectQuality(e.target.value)}
+                      aria-label="Video quality"
+                    >
+                      {qualityInfo.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.value === AUTO_QUALITY ? "Auto" : option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {subtitles.length > 0 && (
+                  <label className="player-select">
+                    <span>Subtitles</span>
+                    <select
+                      value={activeSubtitle ?? "off"}
+                      onChange={(e) => selectSubtitle(e.target.value)}
+                      aria-label="Subtitles"
+                    >
+                      <option value="off">Off</option>
+                      {subtitles.map((sub, idx) => (
+                        <option key={sub.url || idx} value={String(idx)}>
+                          {sub.label || sub.language || `Track ${idx + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
                 <label className="player-select">
-                  <span>Audio</span>
-                  <select
-                    value={activeTrack ?? audioTracks[0]?.id ?? ""}
-                    onChange={(e) => selectAudio(e.target.value)}
-                    aria-label="Audio track"
-                  >
-                    {audioTracks.map((track) => (
-                      <option key={track.id} value={track.id}>
-                        {audioTrackLabel(track)}
+                  <span>Speed</span>
+                  <select value={rate} onChange={(e) => changeRate(e.target.value)} aria-label="Playback speed">
+                    {SPEEDS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}×
                       </option>
                     ))}
                   </select>
                 </label>
-              )}
 
-              {streamQualities.length > 1 ? (
-                <label className="player-select" title="Choose video quality">
-                  <span>Quality</span>
-                  <select
-                    value={activeQualityLabel || streamQualities[0]?.label || "Auto"}
-                    onChange={(e) => selectQuality(e.target.value)}
-                    aria-label="Video quality"
+                {current.type === "series" && nextEpisode && (
+                  <button
+                    type="button"
+                    className="player-btn"
+                    onClick={() => goToEpisode(nextEpisode)}
+                    aria-label={`Play next episode S${nextEpisode.season}E${nextEpisode.episode}`}
                   >
-                    <option value="Auto">Auto</option>
-                    {streamQualities.map((q) => (
-                      <option key={q.label} value={q.label}>
-                        {q.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : qualityInfo.single ? (
-                <span className="player-quality-static" title={qualityNote ?? "Single quality source"}>
-                  <span className="player-quality-label">Quality</span>
-                  <span className="player-quality-value">{qualityLabel}</span>
-                </span>
-              ) : (
-                <label className="player-select" title={qualityNote ?? "Choose video quality"}>
-                  <span>Quality</span>
-                  <select
-                    value={activeLevel}
-                    onChange={(e) => selectQuality(e.target.value)}
-                    aria-label="Video quality"
-                  >
-                    {qualityInfo.options.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.value === AUTO_QUALITY ? "Auto" : option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
+                    Next ⏭
+                  </button>
+                )}
 
-              {subtitles.length > 0 && (
-                <label className="player-select">
-                  <span>Subtitles</span>
-                  <select
-                    value={activeSubtitle ?? "off"}
-                    onChange={(e) => selectSubtitle(e.target.value)}
-                    aria-label="Subtitles"
-                  >
-                    <option value="off">Off</option>
-                    {subtitles.map((sub, idx) => (
-                      <option key={sub.url || idx} value={String(idx)}>
-                        {sub.label || sub.language || `Track ${idx + 1}`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
-              <label className="player-select">
-                <span>Speed</span>
-                <select value={rate} onChange={(e) => changeRate(e.target.value)} aria-label="Playback speed">
-                  {SPEEDS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}×
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {current.type === "series" && nextEpisode && (
                 <button
                   type="button"
                   className="player-btn"
-                  onClick={() => goToEpisode(nextEpisode)}
-                  aria-label={`Play next episode S${nextEpisode.season}E${nextEpisode.episode}`}
+                  onClick={toggleFullscreen}
+                  aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
                 >
-                  Next ⏭
+                  {fullscreen ? "⤢ Exit" : "⤢ Full"}
                 </button>
-              )}
-
-              <button
-                type="button"
-                className="player-btn"
-                onClick={toggleFullscreen}
-                aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-              >
-                {fullscreen ? "⤢ Exit" : "⤢ Full"}
-              </button>
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
     </div>
