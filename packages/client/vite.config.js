@@ -9,10 +9,5 @@ export default defineConfig({
   // /libav/, so keep it out of the pre-bundler to preserve its runtime asset resolution.
   optimizeDeps: {
     exclude: ["libav.js"]
-  },
-  server: {
-    proxy: {
-      "/api": `http://localhost:${serverPort}`
-    }
   }
 });

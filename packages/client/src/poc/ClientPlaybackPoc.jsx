@@ -373,8 +373,7 @@ export default function ClientPlaybackPoc() {
           </div>
         </div>
         <p className="poc-note">
-          <strong>Source acquisition separation:</strong> Real provider scraping (e.g. VegaMovies link resolution)
-          currently exists only in server-side adapters due to CORS and scraping restrictions. This player tests the
+          <strong>Source acquisition separation:</strong> Real provider scraping runs client-side via MovieBox with CORS proxying. This player tests the
           playback and dual-audio pipeline in isolation using client-side file/URL acquisition.
         </p>
       </section>

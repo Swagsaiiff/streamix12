@@ -17,7 +17,7 @@ export default function Navbar({ view, onNavigate, onSearch, searchState, onDire
           Series
         </button>
         {onDirectStream && (
-          <button className="nav-link" onClick={onDirectStream} title="Play direct stream or sample clip directly in browser">
+          <button className="nav-link" onClick={onDirectStream} title="Play direct stream directly in browser">
             Direct Play
           </button>
         )}

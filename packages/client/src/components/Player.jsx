@@ -273,7 +273,7 @@ export default function Player({ item, onClose, onProgress }) {
             // MKV demuxing strictly requires CORS byte-level access in browser JS
             if (declaredOrDetected === "mkv" || rawSourceUrl.includes(".mkv")) {
               throw new Error(
-                "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'. To test playback, use the built-in dual-audio Sample Clip or provide a CORS-enabled direct stream."
+                "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'."
               );
             }
             // For native browser formats (MP4, WebM), HTML5 <video src> does not require CORS headers.
@@ -427,7 +427,7 @@ export default function Player({ item, onClose, onProgress }) {
           setPlaybackMode("client-remux");
           if (probe.corsBlocked) {
             throw new Error(
-              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'. To test playback, use the built-in dual-audio Sample Clip or provide a CORS-enabled direct stream."
+              "Cannot play MKV in browser: media host blocks browser cross-origin requests (CORS). Client-side demuxing requires the media host to provide 'Access-Control-Allow-Origin: *'."
             );
           }
 
@@ -950,65 +950,8 @@ export default function Player({ item, onClose, onProgress }) {
       {phase === "error" && (
         <div className="player-center">
           <div className="player-error-panel" role="alert">
-            <h2>{error && error.includes("No browser-accessible stream source found") ? "No browser-accessible stream source found" : "Playback error"}</h2>
-            <p>{error}</p>
-            {error && error.includes("No browser-accessible stream source found") && (
-              <div
-                style={{
-                  marginTop: "0.85rem",
-                  padding: "0.75rem 1rem",
-                  background: "rgba(59, 130, 246, 0.12)",
-                  border: "1px solid rgba(59, 130, 246, 0.35)",
-                  borderRadius: "6px",
-                  fontSize: "0.85rem",
-                  textAlign: "left",
-                  lineHeight: "1.4"
-                }}
-              >
-                <strong style={{ color: "#93c5fd" }}>Browser-Only Architecture:</strong>
-                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  STREAMIX is operating client-side without a backend server. Playback requires CORS-accessible media streams (MP4, WebM, HLS, DASH, or browser-supported MKV). Titles requiring server-side web scraping (VegaMovies / Cloudflare bypass) cannot be resolved without a backend. You can test client playback using the dual-audio Sample Clip or by providing a direct media URL.
-                </p>
-                <div style={{ marginTop: "0.65rem" }}>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ padding: "0.35rem 0.75rem", fontSize: "0.8rem" }}
-                    onClick={() => {
-                      setCurrent((prev) => ({
-                        ...prev,
-                        title: `${prev.title || "Sample Clip"} (Sample Clip)`,
-                        streamUrl: "/fixtures/multi-audio-test.mkv",
-                        provider: "Direct",
-                        mediaType: "mkv"
-                      }));
-                      setAttempt((n) => n + 1);
-                    }}
-                  >
-                    Play Dual-Audio Sample Clip
-                  </button>
-                </div>
-              </div>
-            )}
-            {error && error.includes("BitTorrent") && (
-              <div
-                style={{
-                  marginTop: "0.85rem",
-                  padding: "0.75rem 1rem",
-                  background: "rgba(168, 85, 247, 0.12)",
-                  border: "1px solid rgba(168, 85, 247, 0.35)",
-                  borderRadius: "6px",
-                  fontSize: "0.85rem",
-                  textAlign: "left",
-                  lineHeight: "1.4"
-                }}
-              >
-                <strong style={{ color: "#d8b4fe" }}>BitTorrent Streams Detected:</strong>
-                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  Streams were discovered on public trackers, but browsers cannot decode raw BitTorrent infoHashes natively. Direct in-browser streaming requires a Debrid service (RealDebrid, AllDebrid, Premiumize) or WebTorrent bridge to convert torrents into HTTP video streams.
-                </p>
-              </div>
-            )}
+            <h2>{error && (error.includes("Stream Not Available") || error.includes("No browser-accessible")) ? "Stream Not Available" : "Playback Error"}</h2>
+            <p>{error && (error.includes("Stream Not Available") || error.includes("No browser-accessible")) ? "The requested title is currently not available for streaming on MovieBox." : error}</p>
             {sourceDiagnostics && sourceDiagnostics.length > 0 && (
               <div
                 style={{
@@ -1022,7 +965,7 @@ export default function Player({ item, onClose, onProgress }) {
                   lineHeight: "1.4"
                 }}
               >
-                <strong style={{ color: "#94a3b8" }}>Provider Discovery Log:</strong>
+                <strong style={{ color: "#94a3b8" }}>Provider Diagnostics:</strong>
                 <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.2rem", color: "#cbd5e1" }}>
                   {sourceDiagnostics.map((diag, idx) => (
                     <li key={idx} style={{ marginTop: "0.15rem" }}>
@@ -1032,26 +975,7 @@ export default function Player({ item, onClose, onProgress }) {
                 </ul>
               </div>
             )}
-            {error && !error.includes("No browser-accessible") && (error.includes("Backend server") || error.includes("502") || error.includes("503") || error.includes("504") || error.includes("unreachable") || error.includes("offline") || error.includes("Network error") || error.includes("Failed to fetch")) && (
-              <div
-                style={{
-                  marginTop: "0.85rem",
-                  padding: "0.75rem 1rem",
-                  background: "rgba(59, 130, 246, 0.12)",
-                  border: "1px solid rgba(59, 130, 246, 0.35)",
-                  borderRadius: "6px",
-                  fontSize: "0.85rem",
-                  textAlign: "left",
-                  lineHeight: "1.4"
-                }}
-              >
-                <strong style={{ color: "#93c5fd" }}>Backend Server Offline:</strong>
-                <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  STREAMIX is operating in browser-only mode. Commercial web-scraping providers (VegaMovies) require a backend server. Supported open titles, archive movies, and the dual-audio Sample Clip play directly in the browser without any server.
-                </p>
-              </div>
-            )}
-            {error && error.includes("CORS") && !error.includes("502") && !error.includes("offline") && (
+            {error && error.includes("CORS") && (
               <div
                 style={{
                   marginTop: "0.85rem",
@@ -1066,7 +990,7 @@ export default function Player({ item, onClose, onProgress }) {
               >
                 <strong style={{ color: "#fbbf24" }}>CORS Media Restriction:</strong>
                 <p style={{ margin: "0.3rem 0 0", color: "#cbd5e1" }}>
-                  The remote media host does not permit browser cross-origin requests (CORS). Client-side MKV demuxing requires the media host to provide "Access-Control-Allow-Origin: *" headers. In browser-only mode, you can play compatible direct MP4/WebM streams or use the built-in dual-audio Sample Clip.
+                  The remote media host does not permit browser cross-origin requests (CORS). Client-side playback requires the media host to provide "Access-Control-Allow-Origin: *" headers.
                 </p>
               </div>
             )}

@@ -3,7 +3,7 @@
 
 export class BaseSourceProvider {
   /**
-   * @param {string} id Unique identifier for the provider (e.g. 'direct', 'wikimedia', 'archive', 'stremio-addon')
+   * @param {string} id Unique identifier for the provider (e.g. 'moviebox', 'direct')
    * @param {string} name Human-readable provider name
    * @param {object} options Provider options
    */

@@ -129,11 +129,6 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                 {rating && <span className="badge badge-rating">★ {rating}</span>}
                 {runtime && <span className="badge">{runtime}</span>}
                 {isSeries && episodeCount > 0 && <span className="badge">{episodeCount} episodes</span>}
-                {resolutionPlan.canResolveClientSide ? (
-                  <span className="badge badge-client" title="Direct browser stream: plays without backend server">Browser Playable</span>
-                ) : (
-                  <span className="badge badge-backend" title="Title requires server-side web scraping (VegaMovies / Cloudflare bypass); not available in browser-only mode">Scraper Required</span>
-                )}
                 {genres?.slice(0, 3).map((genre) => (
                   <span className="badge badge-genre" key={genre}>
                     {genre}
@@ -157,21 +152,6 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                       Start over
                     </button>
                   )}
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() =>
-                      onPlay?.({
-                        ...item,
-                        title: `${title} (Sample Clip)`,
-                        streamUrl: "/fixtures/multi-audio-test.mkv",
-                        provider: "Direct",
-                        mediaType: "mkv"
-                      })
-                    }
-                    title="Play browser-accessible dual-audio test media directly in the client player (100% browser-only)"
-                  >
-                    Play Sample Clip
-                  </button>
                 </div>
               )}
             </div>

@@ -86,7 +86,7 @@ test("very short early positions are not saved (avoids noisy continue-watching)"
 
 test("each episode keeps its own progress", () => {
   const store = createProgressStore(fakeStorage());
-  const series = { provider: "VegaMovies", type: "series", id: "/show/", title: "Show" };
+  const series = { provider: "MovieBox", type: "series", id: "/show/", title: "Show" };
   store.save({ ...series, season: 1, episode: 1, position: 100, duration: 1200 });
   store.save({ ...series, season: 1, episode: 2, position: 400, duration: 1200 });
   assert.equal(store.get({ ...series, season: 1, episode: 1 }).position, 100);

@@ -13,9 +13,17 @@ export const HOST_POOL = [
   "https://api.inmoviebox.com"
 ];
 
+// Candidates for public CORS proxy forwarding
+export const CORS_PROXIES = [
+  "https://corsproxy.io/?url=%s",
+  "https://corsproxy.io/?%s",
+  "https://api.allorigins.win/raw?url=%s"
+];
+
 const RETRY_STATUS_CODES = [401, 403, 406, 407, 429, 500, 502, 503, 504];
 
 let activeHostIndex = 0;
+let activeProxyIndex = 0;
 let clientIdentity = null;
 
 function getClientIdentity() {
@@ -26,10 +34,8 @@ function getClientIdentity() {
 }
 
 export function buildProxiedUrl(targetUrl, proxyBase = null) {
-  // If explicitly provided or running in browser with CORS restrictions:
   const isBrowser = typeof window !== "undefined" && typeof window.document !== "undefined";
 
-  // Priority 1: Custom proxy override (e.g. from env or options)
   if (proxyBase) {
     if (proxyBase.includes("%s")) {
       return proxyBase.replace("%s", encodeURIComponent(targetUrl));
@@ -37,14 +43,11 @@ export function buildProxiedUrl(targetUrl, proxyBase = null) {
     return `${proxyBase.replace(/\/?$/, "/")}${encodeURIComponent(targetUrl)}`;
   }
 
-  // Priority 2: In Vite dev mode, we can use the local dev proxy if available, but
-  // standard corsproxy.io works reliably for external browser requests.
   if (isBrowser) {
-    // We use corsproxy.io as requested: https://corsproxy.io/?url=
-    return `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+    const template = CORS_PROXIES[activeProxyIndex % CORS_PROXIES.length];
+    return template.replace("%s", encodeURIComponent(targetUrl));
   }
 
-  // Direct for Node.js / test environments
   return targetUrl;
 }
 
@@ -107,7 +110,6 @@ export class MovieBoxClient {
     try {
       return await this.requestHosts(method, pathAndQuery, bodyStr, token, options);
     } catch (err) {
-      // If 401 or 403, retry once with fresh session
       if (err.status === 401 || err.status === 403 || err.message?.includes("token")) {
         this.invalidateSession();
         token = await this.ensureSession(options.signal);
@@ -140,57 +142,65 @@ export class MovieBoxClient {
         spoofedIp: this.identity.spoofedIp
       });
 
-      // Wrap in CORS proxy if browser or enabled
-      const fetchUrl = this.useProxy
-        ? buildProxiedUrl(targetUrl, this.corsProxy)
-        : targetUrl;
+      // Wrap in CORS proxy if browser or enabled with proxy failover
+      const proxyAttempts = this.useProxy && !this.corsProxy ? CORS_PROXIES.length : 1;
 
-      try {
-        const fetchOptions = {
-          method,
-          headers,
-          signal: options.signal
-        };
-        if (bodyStr != null) {
-          fetchOptions.body = bodyStr;
-        }
+      for (let p = 0; p < proxyAttempts; p++) {
+        const currentProxy = this.corsProxy || CORS_PROXIES[(activeProxyIndex + p) % CORS_PROXIES.length];
+        const fetchUrl = this.useProxy
+          ? buildProxiedUrl(targetUrl, currentProxy)
+          : targetUrl;
 
-        const resp = await fetch(fetchUrl, fetchOptions);
-
-        if (RETRY_STATUS_CODES.includes(resp.status)) {
-          lastError = new Error(`MovieBox host ${baseHost} returned HTTP ${resp.status}`);
-          lastError.status = resp.status;
-          activeHostIndex = (idx + 1) % HOST_POOL.length;
-          continue;
-        }
-
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          lastError = new Error(`MovieBox request failed with HTTP ${resp.status}: ${text.slice(0, 100)}`);
-          lastError.status = resp.status;
-          activeHostIndex = (idx + 1) % HOST_POOL.length;
-          continue;
-        }
-
-        const rawText = await resp.text();
-        let json;
         try {
-          json = JSON.parse(rawText);
-        } catch {
-          lastError = new Error(`MovieBox host ${baseHost} returned non-JSON response`);
-          activeHostIndex = (idx + 1) % HOST_POOL.length;
-          continue;
-        }
+          const fetchOptions = {
+            method,
+            headers,
+            signal: options.signal
+          };
+          if (bodyStr != null) {
+            fetchOptions.body = bodyStr;
+          }
 
-        activeHostIndex = idx;
-        return json.data !== undefined ? json.data : json;
-      } catch (err) {
-        if (err.name === "AbortError" || options.signal?.aborted) {
-          throw err;
+          const resp = await fetch(fetchUrl, fetchOptions);
+
+          if (RETRY_STATUS_CODES.includes(resp.status)) {
+            lastError = new Error(`MovieBox host ${baseHost} returned HTTP ${resp.status}`);
+            lastError.status = resp.status;
+            activeHostIndex = (idx + 1) % HOST_POOL.length;
+            break; // Try next host
+          }
+
+          if (!resp.ok) {
+            const text = await resp.text().catch(() => "");
+            lastError = new Error(`MovieBox request failed with HTTP ${resp.status}: ${text.slice(0, 100)}`);
+            lastError.status = resp.status;
+            continue; // Try next proxy or next host
+          }
+
+          const rawText = await resp.text();
+          let json;
+          try {
+            json = JSON.parse(rawText);
+          } catch {
+            lastError = new Error(`MovieBox host ${baseHost} returned non-JSON response`);
+            continue;
+          }
+
+          activeHostIndex = idx;
+          if (this.useProxy && !this.corsProxy) {
+            activeProxyIndex = (activeProxyIndex + p) % CORS_PROXIES.length;
+          }
+          return json.data !== undefined ? json.data : json;
+        } catch (err) {
+          if (err.name === "AbortError" || options.signal?.aborted) {
+            throw err;
+          }
+          lastError = err;
+          // Proxy network failure or blocked, try next proxy candidate
         }
-        lastError = err;
-        activeHostIndex = (idx + 1) % HOST_POOL.length;
       }
+
+      activeHostIndex = (idx + 1) % HOST_POOL.length;
     }
 
     throw lastError || new Error("All MovieBox hosts exhausted");

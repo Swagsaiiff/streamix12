@@ -3,31 +3,12 @@ import { detectFormatFromUrl } from "../source-detector.js";
 
 export class DirectSourceProvider extends BaseSourceProvider {
   constructor(options = {}) {
-    super("direct", "Direct Media & Fixtures", options);
+    super("direct", "Direct Media", options);
   }
 
   async resolveStreams(query = {}, options = {}) {
-    const { streamUrl, mediaUrl, url, sourceUrl, id, title, mediaType } = query;
+    const { streamUrl, mediaUrl, url, sourceUrl, title, mediaType } = query;
 
-    // 1. Check local fixtures / sample clips
-    if (id === "sample-clip" || id === "multi-audio-test") {
-      return {
-        sources: [
-          {
-            url: "/fixtures/multi-audio-test.mkv",
-            format: "mkv",
-            title: "Dual-Audio Sample Clip (H.264 / AAC Eng + Spa)",
-            quality: "360p",
-            isPlayableInBrowser: true,
-            provider: this.name,
-            note: "Built-in dual-audio MKV fixture"
-          }
-        ],
-        diagnostics: ["Resolved built-in dual-audio test fixture"]
-      };
-    }
-
-    // 2. Check explicit direct media URLs
     const explicitUrl =
       streamUrl ||
       mediaUrl ||
@@ -57,7 +38,7 @@ export class DirectSourceProvider extends BaseSourceProvider {
 
     return {
       sources: [],
-      diagnostics: ["No direct stream URL or test fixture provided in query"]
+      diagnostics: ["No direct stream URL provided in query"]
     };
   }
 }
