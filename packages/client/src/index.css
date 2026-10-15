@@ -1565,6 +1565,25 @@ body {
   box-shadow: 0 0 0 2px rgba(229, 9, 20, 0.25);
 }
 
+.modal-lang-value {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #fff;
+  padding: 0.25rem 0.55rem;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.modal-lang-selector.single-lang {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.player-top-audio {
+  margin-left: 0.5rem;
+}
+
+
 .btn-secondary {
   background: rgba(255, 255, 255, 0.12);
   color: var(--sx-text);

@@ -1,4 +1,4 @@
-const LANGUAGE_NAMES = {
+export const LANGUAGE_NAMES = {
   eng: "English",
   en: "English",
   hin: "Hindi",

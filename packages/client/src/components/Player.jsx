@@ -327,6 +327,19 @@ export default function Player({ item, onClose, onProgress }) {
         setSourceStatus("embed_stream");
         setSourceProvider("Web Embed");
         setSourceNote("Web Embed Stream (vidsrc.to)");
+
+        if (Array.isArray(playItem.availableLanguages) && playItem.availableLanguages.length > 0) {
+          const tracks = playItem.availableLanguages.map((l, idx) => ({
+            id: l.code || String(idx),
+            label: l.name,
+            name: l.name,
+            language: l.code,
+            code: l.code
+          }));
+          setAudioTracks(tracks);
+          const matchSelected = tracks.find((t) => t.code === lang || t.language === lang);
+          setActiveTrack(matchSelected ? matchSelected.id : tracks[0].id);
+        }
         return;
       }
 
@@ -386,9 +399,24 @@ export default function Player({ item, onClose, onProgress }) {
           setStreamQualities([]);
           setActiveQualityLabel(null);
         }
-        if (Array.isArray(stream.audioTracks) && stream.audioTracks.length > 0) {
-          setAudioTracks(stream.audioTracks);
-          setActiveTrack(stream.audioTracks[0].id);
+
+        let resolvedTracks = Array.isArray(stream.audioTracks) && stream.audioTracks.length > 0 ? stream.audioTracks : [];
+        if (resolvedTracks.length === 0 && Array.isArray(playItem.availableLanguages) && playItem.availableLanguages.length > 0) {
+          resolvedTracks = playItem.availableLanguages.map((l, idx) => ({
+            id: l.code || String(idx),
+            label: l.name,
+            name: l.name,
+            language: l.code,
+            code: l.code,
+            subjectId: l.subjectId,
+            streamUrl: l.streamUrl || l.url
+          }));
+        }
+        setAudioTracks(resolvedTracks);
+        if (resolvedTracks.length > 0) {
+          const reqLang = (playItem.selectedLanguage || playItem.lang || preferredLang || "").toLowerCase();
+          const matchSelected = resolvedTracks.find((t) => (t.code && t.code.toLowerCase() === reqLang) || (t.language && t.language.toLowerCase() === reqLang) || t.id === reqLang);
+          setActiveTrack(matchSelected ? matchSelected.id : resolvedTracks[0].id);
         }
         if (Array.isArray(stream.subtitles) && stream.subtitles.length > 0) {
           setSubtitles(stream.subtitles);
@@ -872,20 +900,53 @@ export default function Player({ item, onClose, onProgress }) {
     const trackNum = Number(id);
     const hls = hlsRef.current;
 
-    // 1. HLS internal audio track switching
-    if (hls && hls.audioTracks && hls.audioTracks.length > 0 && hls.audioTracks[trackNum]) {
+    // 1. Web Embed mode audio switching
+    if (playbackMode === "embed") {
+      setPreferredLang(id);
+      setActiveTrack(id);
+      try {
+        localStorage.setItem("streamix.lang", id);
+      } catch {}
+      const playItem = current;
+      const tmdbId =
+        playItem.tmdbId ||
+        (typeof playItem.id === "number" || /^\d{1,9}$/.test(String(playItem.id))
+          ? Number(playItem.id)
+          : null);
+      const isSeries = playItem.type === "series" || (playItem.season != null && playItem.episode != null);
+      const season = playItem.season ?? 1;
+      const episode = playItem.episode ?? 1;
+      const newEmbedUrl = buildWebEmbedUrl({
+        tmdbId,
+        type: playItem.type,
+        season,
+        episode,
+        selectedLanguage: id
+      });
+      if (newEmbedUrl) {
+        setEmbedStreamUrl(newEmbedUrl);
+      }
+      return;
+    }
+
+    // 2. HLS internal audio track switching
+    if (hls && hls.audioTracks && hls.audioTracks.length > 0 && !Number.isNaN(trackNum) && hls.audioTracks[trackNum]) {
       hls.audioTrack = trackNum;
       setActiveTrack(trackNum);
       return;
     }
 
-    // 2. MovieBox multi-language dub switching
-    const targetDub = audioTracks.find((t) => String(t.id) === String(id));
+    // 3. MovieBox multi-language dub / stream switching
+    const targetDub = audioTracks.find((t) => String(t.id) === String(id) || String(t.code) === String(id) || String(t.language) === String(id));
     if (targetDub?.subjectId) {
       const video = videoRef.current;
       const preserveTime = video ? video.currentTime : 0;
       const wasPlaying = video ? !video.paused : false;
       setActiveTrack(id);
+      setPreferredLang(targetDub.code || targetDub.language || id);
+      try {
+        localStorage.setItem("streamix.lang", targetDub.code || targetDub.language || id);
+      } catch {}
       setSwitching(true);
 
       try {
@@ -919,6 +980,35 @@ export default function Player({ item, onClose, onProgress }) {
       } catch (err) {
         setError(`Audio dub switch failed: ${err.message}`);
         setSwitching(false);
+      }
+      return;
+    } else if (targetDub?.streamUrl || targetDub?.url) {
+      const streamUrl = targetDub.streamUrl || targetDub.url;
+      const video = videoRef.current;
+      const preserveTime = video ? video.currentTime : 0;
+      const wasPlaying = video ? !video.paused : false;
+      setActiveTrack(id);
+      setPreferredLang(targetDub.code || targetDub.language || id);
+      try {
+        localStorage.setItem("streamix.lang", targetDub.code || targetDub.language || id);
+      } catch {}
+      setSwitching(true);
+      activeMediaUrlRef.current = streamUrl;
+      if (hls && (streamUrl.includes(".m3u8") || streamUrl.includes("/hls/"))) {
+        hls.loadSource(streamUrl);
+        hls.once(hls.constructor.Events?.MANIFEST_PARSED || "hlsManifestParsed", () => {
+          if (preserveTime > 0 && video) video.currentTime = preserveTime;
+          if (wasPlaying && video) video.play().catch(() => {});
+          setSwitching(false);
+        });
+      } else if (video) {
+        video.src = streamUrl;
+        video.load();
+        video.addEventListener("loadedmetadata", () => {
+          if (preserveTime > 0) video.currentTime = preserveTime;
+          if (wasPlaying) video.play().catch(() => {});
+          setSwitching(false);
+        }, { once: true });
       }
       return;
     }
@@ -1266,6 +1356,22 @@ export default function Player({ item, onClose, onProgress }) {
                 Web Embed Stream
               </button>
             </div>
+            {audioTracks.length > 1 && (
+              <label className="player-select player-top-audio" title="Switch audio language">
+                <span>Audio</span>
+                <select
+                  value={activeTrack ?? audioTracks[0]?.id ?? ""}
+                  onChange={(e) => selectAudio(e.target.value)}
+                  aria-label="Switch audio language"
+                >
+                  {audioTracks.map((track) => (
+                    <option key={track.id} value={track.id}>
+                      {track.label || track.name || audioTrackLabel(track)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
             {sourceNote && (
               <span className="player-source" title={sourceNote}>

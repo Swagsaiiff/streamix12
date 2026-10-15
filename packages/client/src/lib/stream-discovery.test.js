@@ -106,3 +106,51 @@ test("Embed vs Direct source detection differentiates iframe embed URLs from dir
   assert.equal(isEmbedStream("https://cdn.example.com/video.mp4"), false);
 });
 
+test("parseLanguageTag accurately extracts language from diverse provider tags", async () => {
+  const { parseLanguageTag } = await import("./source-providers/index.js");
+
+  assert.deepEqual(parseLanguageTag("[Hindi]"), { code: "hi", name: "Hindi" });
+  assert.deepEqual(parseLanguageTag("Hindi Dub"), { code: "hi", name: "Hindi" });
+  assert.deepEqual(parseLanguageTag("hin"), { code: "hi", name: "Hindi" });
+  assert.deepEqual(parseLanguageTag("Spanish Dub"), { code: "es", name: "Spanish" });
+  assert.deepEqual(parseLanguageTag("Tamil"), { code: "ta", name: "Tamil" });
+  assert.deepEqual(parseLanguageTag("telugu"), { code: "te", name: "Telugu" });
+  assert.deepEqual(parseLanguageTag("Korean"), { code: "ko", name: "Korean" });
+  assert.deepEqual(parseLanguageTag("French"), { code: "fr", name: "French" });
+  assert.equal(parseLanguageTag("1080p Web-DL"), null);
+  assert.equal(parseLanguageTag(""), null);
+  assert.equal(parseLanguageTag(null), null);
+});
+
+test("discoverAvailableAudioLanguages dynamically discovers title languages without hardcoded arrays", async () => {
+  const { discoverAvailableAudioLanguages } = await import("./source-providers/index.js");
+
+  // 1. Movie with original language only
+  const langs = await discoverAvailableAudioLanguages({
+    item: { original_language: "ko", title: "Single Language Korean Film" }
+  });
+  assert.ok(Array.isArray(langs));
+  assert.equal(langs.length, 1);
+  assert.equal(langs[0].code, "ko");
+  assert.equal(langs[0].name, "Korean (Original)");
+  assert.equal(langs[0].isOriginal, true);
+
+  // 2. English title defaults to English (Original)
+  const engLangs = await discoverAvailableAudioLanguages({
+    item: { original_language: "en", title: "English Feature Film" }
+  });
+  assert.equal(engLangs[0].code, "en");
+  assert.equal(engLangs[0].name, "English (Original)");
+});
+
+test("buildWebEmbedUrl supports multiembed server and language query parameter", () => {
+  const multiUrl = buildWebEmbedUrl({
+    tmdbId: 550,
+    type: "movie",
+    server: "multiembed",
+    selectedLanguage: "hi"
+  });
+  assert.equal(multiUrl, "https://multiembed.mov/?video_id=550&tmdb=1&lang=hi");
+});
+
+

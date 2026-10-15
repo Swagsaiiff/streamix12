@@ -931,3 +931,37 @@ Provide an "Audio Language" selector in the Movie/Series Details Modal (similar 
 - `npm run build` -> Client bundle successfully built in 346ms.
 - Vite dev server running on `http://localhost:5173/` -> HTTP 200.
 
+## Task: Real-Time Dynamic Audio Language Extraction & Stream Switching
+
+### Objective
+1. Remove static hardcoded language list from Details Modal. Default the initial audio language to the movie/series' `original_language` from TMDB.
+2. Dynamically extract and discover available audio languages from MovieBox dubs and stream/server options. Display a single language badge if only 1 language is available, or a dynamic dropdown if multiple languages exist.
+3. Enable real dynamic stream switching:
+   - For Direct Streams (MovieBox): switch to language-specific dub `subjectId` or `.m3u8` link preserving playback position.
+   - For Web Embeds (VidSrc / MultiEmbed): dynamically route the iframe to the language-specific URL/parameter (`?lang=${code}` or `&lang=${code}`).
+
+### Changes Implemented
+1. **Removed Static Language Array (`DetailModal.jsx`)**:
+   - Completely deleted `POPULAR_LANGUAGES` array.
+   - Initialized selected language and available languages to title's `original_language` (e.g., "Korean (Original)", "Japanese (Original)", "English (Original)").
+2. **Dynamic Language Discovery (`packages/client/src/lib/source-providers/moviebox-source-provider.js`)**:
+   - Implemented `parseLanguageTag(text)` to strictly identify real languages and language codes (`[Hindi]`, `Hindi Dub`, `Tamil`, `es`, `ko`, `ja`, etc.) without false positive resolution tags.
+   - Implemented `discoverAvailableAudioLanguages(query, options)`: queries MovieBox details (`details.dubs`), resource audio tags, and title tags. Caches results to avoid redundant network requests.
+   - Single-language titles display a sleek `Audio: Language (Original)` indicator gracefully, while multi-audio titles render the dynamic dropdown with only real available options.
+3. **Dynamic Stream Switching (`packages/client/src/components/Player.jsx`)**:
+   - In `selectAudio`:
+     - Embed mode: re-routes `embedStreamUrl` with `buildWebEmbedUrl` incorporating the selected language parameter, updating the iframe in real time.
+     - Direct mode: finds matching dub `subjectId` or language `.m3u8`, resolves dubbed streams, and updates HLS/video while preserving `currentTime`.
+   - Populated `audioTracks` with `availableLanguages` so player controls always offer switching for all discovered languages.
+   - Added audio selector to `player-top` bar for immediate switching during embed and direct playback.
+4. **CSS Enhancements (`packages/client/src/index.css`)**:
+   - Styled `.modal-lang-value`, `.modal-lang-selector.single-lang`, and `.player-top-audio`.
+5. **Test Suite Expansion (`packages/client/src/lib/stream-discovery.test.js`)**:
+   - Added unit tests for `parseLanguageTag`, `discoverAvailableAudioLanguages`, and `buildWebEmbedUrl` with `server: "multiembed"`.
+
+### Verification (observed output)
+- `npm test` -> 91 passed, 0 failed.
+- `npm run build` -> Clean production build in 359ms.
+- Local dev server -> HTTP 200 at `http://localhost:5173/`.
+
+

@@ -115,3 +115,9 @@ export async function discoverClientStream(item = {}, options = {}) {
   const { defaultDiscoveryEngine } = await import("./source-providers/index.js");
   return defaultDiscoveryEngine.discoverStream(item, options);
 }
+
+export async function discoverAvailableAudioLanguages(item = {}, options = {}) {
+  const { discoverAvailableAudioLanguages: discoverLangs } = await import("./source-providers/index.js");
+  return discoverLangs(item, options);
+}
+
