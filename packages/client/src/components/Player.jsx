@@ -13,6 +13,7 @@ import { progressStore, clampPosition } from "../lib/progress.js";
 import { inspectMatroska, browserSupportFor } from "../poc/mkv-inspect.js";
 import { remuxMkv, remuxMkvToMp4, inspectMkvSource, terminateLibav } from "../poc/client-remux.js";
 import { probeMediaSource, detectFormatFromUrl } from "../lib/source-detector.js";
+import { movieboxResolveStreams, movieboxGetDetails } from "../lib/moviebox/index.js";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const HIDE_DELAY_MS = 3000;
@@ -690,7 +691,6 @@ export default function Player({ item, onClose, onProgress }) {
       setSwitching(true);
 
       try {
-        const { movieboxResolveStreams, movieboxGetDetails } = await import("../lib/moviebox/index.js");
         const details = await movieboxGetDetails(targetDub.subjectId).catch(() => null);
         const resolved = await movieboxResolveStreams({
           subjectId: targetDub.subjectId,
