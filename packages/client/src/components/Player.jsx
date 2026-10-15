@@ -76,6 +76,10 @@ export default function Player({ item, onClose, onProgress }) {
   const [activeTrack, setActiveTrack] = useState(null);
   const [levels, setLevels] = useState([]);
   const [activeLevel, setActiveLevel] = useState(AUTO_QUALITY);
+  const [streamQualities, setStreamQualities] = useState([]);
+  const [activeQualityLabel, setActiveQualityLabel] = useState(null);
+  const [subtitles, setSubtitles] = useState([]);
+  const [activeSubtitle, setActiveSubtitle] = useState("off");
   const [preferredLang, setPreferredLang] = useState(() => localStorage.getItem("streamix.lang") || "");
   const [fullscreen, setFullscreen] = useState(false);
   const [sourceNote, setSourceNote] = useState(null);
@@ -208,6 +212,23 @@ export default function Player({ item, onClose, onProgress }) {
         setSourceNote(stream.note ?? null);
         setSourceStatus(stream.resolution?.status ?? null);
         setSourceProvider(stream.provider?.name ?? null);
+
+        if (Array.isArray(stream.qualities) && stream.qualities.length > 0) {
+          setStreamQualities(stream.qualities);
+          setActiveQualityLabel(stream.qualities[0].label);
+        } else {
+          setStreamQualities([]);
+          setActiveQualityLabel(null);
+        }
+        if (Array.isArray(stream.audioTracks) && stream.audioTracks.length > 0) {
+          setAudioTracks(stream.audioTracks);
+          setActiveTrack(stream.audioTracks[0].id);
+        }
+        if (Array.isArray(stream.subtitles) && stream.subtitles.length > 0) {
+          setSubtitles(stream.subtitles);
+        } else {
+          setSubtitles([]);
+        }
 
         const video = videoRef.current;
         if (!video) return;
@@ -650,12 +671,61 @@ export default function Player({ item, onClose, onProgress }) {
 
   const selectAudio = useCallback(async (id) => {
     const trackNum = Number(id);
-    if (hlsRef.current) {
-      hlsRef.current.audioTrack = trackNum;
+    const hls = hlsRef.current;
+
+    // 1. HLS internal audio track switching
+    if (hls && hls.audioTracks && hls.audioTracks.length > 0 && hls.audioTracks[trackNum]) {
+      hls.audioTrack = trackNum;
       setActiveTrack(trackNum);
       return;
     }
 
+    // 2. MovieBox multi-language dub switching
+    const targetDub = audioTracks.find((t) => String(t.id) === String(id));
+    if (targetDub?.subjectId) {
+      const video = videoRef.current;
+      const preserveTime = video ? video.currentTime : 0;
+      const wasPlaying = video ? !video.paused : false;
+      setActiveTrack(id);
+      setSwitching(true);
+
+      try {
+        const { movieboxResolveStreams, movieboxGetDetails } = await import("../lib/moviebox/index.js");
+        const details = await movieboxGetDetails(targetDub.subjectId).catch(() => null);
+        const resolved = await movieboxResolveStreams({
+          subjectId: targetDub.subjectId,
+          season: current.season || 0,
+          episode: current.episode || 0,
+          details
+        });
+
+        if (resolved.sourceUrl) {
+          activeMediaUrlRef.current = resolved.sourceUrl;
+          if (hls) {
+            hls.loadSource(resolved.sourceUrl);
+            hls.once(hls.constructor.Events?.MANIFEST_PARSED || "hlsManifestParsed", () => {
+              if (preserveTime > 0 && video) video.currentTime = preserveTime;
+              if (wasPlaying && video) video.play().catch(() => {});
+              setSwitching(false);
+            });
+          } else if (video) {
+            video.src = resolved.sourceUrl;
+            video.load();
+            video.addEventListener("loadedmetadata", () => {
+              if (preserveTime > 0) video.currentTime = preserveTime;
+              if (wasPlaying) video.play().catch(() => {});
+              setSwitching(false);
+            }, { once: true });
+          }
+        }
+      } catch (err) {
+        setError(`Audio dub switch failed: ${err.message}`);
+        setSwitching(false);
+      }
+      return;
+    }
+
+    // 3. Client remux fallback
     if (playbackMode === "client-remux" && activeMediaUrlRef.current) {
       if (switchingLockRef.current) return;
       const targetTrack = audioTracks[trackNum];
@@ -699,13 +769,87 @@ export default function Player({ item, onClose, onProgress }) {
         switchingLockRef.current = false;
       }
     }
-  }, [playbackMode, audioTracks]);
+  }, [playbackMode, audioTracks, current.season, current.episode]);
 
   const selectQuality = useCallback((value) => {
     const hls = hlsRef.current;
-    if (!hls) return;
-    setActiveLevel(applyQuality(hls, value));
-  }, []);
+
+    // 1. MovieBox discrete qualities
+    if (streamQualities.length > 0) {
+      if (value === "Auto") {
+        setActiveQualityLabel("Auto");
+        if (hls) hls.currentLevel = -1;
+        return;
+      }
+      const match = streamQualities.find((q) => q.label === value || String(q.height) === String(value));
+      if (match) {
+        setActiveQualityLabel(match.label);
+        // If HLS levels match
+        if (hls && levels.length > 0) {
+          const matchLvl = levels.findIndex((l) => l.height === match.height);
+          if (matchLvl !== -1) {
+            hls.currentLevel = matchLvl;
+            return;
+          }
+        }
+        // If switching stream URL dynamically
+        if (match.url && match.url !== activeMediaUrlRef.current) {
+          const video = videoRef.current;
+          const pos = video ? video.currentTime : 0;
+          const wasPlaying = video ? !video.paused : false;
+          activeMediaUrlRef.current = match.url;
+          if (hls) {
+            hls.loadSource(match.url);
+            hls.once(hls.constructor.Events?.MANIFEST_PARSED || "hlsManifestParsed", () => {
+              if (pos > 0 && video) video.currentTime = pos;
+              if (wasPlaying && video) video.play().catch(() => {});
+            });
+          } else if (video) {
+            video.src = match.url;
+            video.load();
+            video.addEventListener("loadedmetadata", () => {
+              if (pos > 0) video.currentTime = pos;
+              if (wasPlaying) video.play().catch(() => {});
+            }, { once: true });
+          }
+        }
+      }
+      return;
+    }
+
+    // 2. Standard HLS levels
+    if (hls) {
+      setActiveLevel(applyQuality(hls, value));
+    }
+  }, [levels, streamQualities]);
+
+  const selectSubtitle = useCallback((idx) => {
+    setActiveSubtitle(idx);
+    const video = videoRef.current;
+    if (!video) return;
+
+    const oldTracks = video.querySelectorAll("track.player-dyn-sub");
+    oldTracks.forEach((t) => t.remove());
+
+    if (idx === "off" || !subtitles[Number(idx)]) {
+      return;
+    }
+
+    const sub = subtitles[Number(idx)];
+    if (sub?.url) {
+      const track = document.createElement("track");
+      track.className = "player-dyn-sub";
+      track.kind = "subtitles";
+      track.label = sub.label || sub.language || "Subtitle";
+      track.srclang = sub.language || "en";
+      track.src = sub.url;
+      track.default = true;
+      video.appendChild(track);
+      if (track.track) {
+        track.track.mode = "showing";
+      }
+    }
+  }, [subtitles]);
 
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -1076,7 +1220,23 @@ export default function Player({ item, onClose, onProgress }) {
                 </label>
               )}
 
-              {qualityInfo.single ? (
+              {streamQualities.length > 1 ? (
+                <label className="player-select" title="Choose video quality">
+                  <span>Quality</span>
+                  <select
+                    value={activeQualityLabel || streamQualities[0]?.label || "Auto"}
+                    onChange={(e) => selectQuality(e.target.value)}
+                    aria-label="Video quality"
+                  >
+                    <option value="Auto">Auto</option>
+                    {streamQualities.map((q) => (
+                      <option key={q.label} value={q.label}>
+                        {q.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : qualityInfo.single ? (
                 <span className="player-quality-static" title={qualityNote ?? "Single quality source"}>
                   <span className="player-quality-label">Quality</span>
                   <span className="player-quality-value">{qualityLabel}</span>
@@ -1092,6 +1252,24 @@ export default function Player({ item, onClose, onProgress }) {
                     {qualityInfo.options.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.value === AUTO_QUALITY ? "Auto" : option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {subtitles.length > 0 && (
+                <label className="player-select">
+                  <span>Subtitles</span>
+                  <select
+                    value={activeSubtitle ?? "off"}
+                    onChange={(e) => selectSubtitle(e.target.value)}
+                    aria-label="Subtitles"
+                  >
+                    <option value="off">Off</option>
+                    {subtitles.map((sub, idx) => (
+                      <option key={sub.url || idx} value={String(idx)}>
+                        {sub.label || sub.language || `Track ${idx + 1}`}
                       </option>
                     ))}
                   </select>

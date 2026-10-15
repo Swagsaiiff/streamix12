@@ -1,4 +1,5 @@
 import { DirectSourceProvider } from "./direct-source-provider.js";
+import { MovieBoxSourceProvider } from "./moviebox-source-provider.js";
 import { WikimediaSourceProvider } from "./wikimedia-source-provider.js";
 import { ArchiveOrgSourceProvider } from "./archive-source-provider.js";
 import { StremioAddonSourceProvider } from "./stremio-addon-source-provider.js";
@@ -7,6 +8,7 @@ export class SourceDiscoveryEngine {
   constructor(options = {}) {
     this.providers = [
       new DirectSourceProvider(options.direct),
+      new MovieBoxSourceProvider(options.moviebox),
       new WikimediaSourceProvider(options.wikimedia),
       new ArchiveOrgSourceProvider(options.archive),
       new StremioAddonSourceProvider(options.stremio)
@@ -51,7 +53,9 @@ export class SourceDiscoveryEngine {
             streamModeReason: "discovered_browser_stream",
             sourceUrl: playable.url,
             mediaType: playable.format !== "auto" ? playable.format : (item.mediaType || null),
+            qualities: playable.qualities || null,
             audioTracks: playable.audioTracks || [],
+            subtitles: playable.subtitles || [],
             headers: playable.headers || {},
             title: playable.title || item.title || null,
             year: item.year ?? null,

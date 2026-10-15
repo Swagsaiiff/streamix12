@@ -2,9 +2,51 @@
 
 ## Current phase
 
-Phase 4: Connected Client-Side Stream Discovery Pipeline (`main`).
+Phase 5: Frontend-Only MovieBox-Tui Provider & React HLS Player Integration (`main`).
 
-## Connected Client-Side Stream Discovery Pipeline
+## Frontend-Only MovieBox-Tui Provider & React HLS Player Integration
+
+### 1. Purged Old Backend & Vegamovies Logic
+- **Deleted Scrapers & Server Transcoding**:
+  - Removed `packages/server/src/providers/vegamovies.js` and `packages/server/src/providers/vegamovies.test.js`.
+  - Removed FFmpeg transcoding pipelines: `packages/server/src/providers/stream.js`, `packages/server/src/providers/stream.test.js`, and `packages/server/src/routes/stream.js`.
+  - Removed server proxy routes `packages/server/src/routes/proxy.js` and `packages/server/src/routes/proxy.test.js`.
+  - Removed `streamRouter` and `streamManager` initialization from `packages/server/src/index.js`.
+  - Purged all backend-dependent stream and audio switching endpoints from `packages/client/src/api.js`.
+
+### 2. Ported MovieBox Provider Logic to Frontend (JS/ESM)
+- **Modular Client-Side Service (`packages/client/src/lib/moviebox/`)**:
+  - `crypto.js`: Pure JavaScript implementation of MD5, HMAC-MD5 with `DEFAULT_SECRET_BYTES`, `generateXClientToken`, `generateXTrSignature`, `buildCanonicalString`, sorted query normalization, realistic spoofed IPs, and Android device identity header generators.
+  - `session.js`: Visitor session caching (`localStorage` + in-memory), JWT claims parsing (`userId`/`uid` and `exp`), and validity validation.
+  - `client.js`: HTTP request dispatch with host rotation (`HOST_POOL`), retry logic for status codes `401/403/429/500/502/503/504`, automatic session refresh, and client-side CORS proxy support (`https://corsproxy.io/?url=`).
+  - `adapt.js`:
+    - `cleanMovieboxTitle()`: Strips bracket tags, release resolution prefixes, season tags, and language dub tags.
+    - `movieboxSearch()`: Searches titles via `/wefeed-mobile-bff/subject-api/search/v2`.
+    - `movieboxGetDetails()`: Resolves title metadata, overview, ratings, cast, seasons/episodes, and audio dubs via `/wefeed-mobile-bff/subject-api/get` and `season-info`.
+    - `movieboxResolveStreams()`: Fetches play info and resources, resolves signed CloudFront / Edge-Cache policies into playable `.m3u8` HLS or `.mpd` DASH manifests, extracts multiple video qualities (e.g. 1080p, 720p, 480p), multi-language audio dubs, and subtitles.
+  - `moviebox-source-provider.js`: Registered in `SourceDiscoveryEngine` as a high-priority browser streaming provider.
+
+### 3. Quality & Audio Track Selection Logic
+- Stored fetched stream sources (`streamQualities`, `audioTracks`, `subtitles`) in React state in `Player.jsx`.
+- Added interactive UI controls in the Player control bar:
+  - Quality selector dropdown (`streamQualities`: 1080p, 720p, 480p, Auto).
+  - Audio selector dropdown (multi-language dubs and HLS audio tracks).
+  - Subtitle selector dropdown (captions from MovieBox response).
+
+### 4. React Player Integration with `hls.js`
+- Initialized `hls.js` for `.m3u8` HLS stream playback directly in the browser.
+- Implemented dynamic stream switching:
+  - Quality switching: switches `hls.currentLevel` or dynamically swaps manifest URL while preserving `video.currentTime` and playback state.
+  - Multi-language audio switching: switches `hls.audioTrack` or loads dub-specific streams seamlessly without interrupting progress.
+
+### 5. Verification Evidence
+- `node --test packages/client/src/lib/moviebox/moviebox.test.js`: **7/7 tests passed**.
+- `node --test packages/client/src/lib/*.test.js packages/client/src/lib/moviebox/*.test.js`: **96/96 tests passed**.
+- `npm run test --workspace=packages/server`: **45/45 tests passed**.
+- Root `npm test`: **141/141 total tests passed with 0 failures**.
+- `npm run build --workspace=packages/client`: Bundled Vite client in **460ms** with zero errors.
+
+---
 
 ### 1. Architectural Fixes & Integration
 1. **Direct Player Connection (`Player.jsx` & `api.js`)**:

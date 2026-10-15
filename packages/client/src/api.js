@@ -3,8 +3,11 @@ import {
   directSearch,
   directGetDetails
 } from "./lib/direct-catalog.js";
-
-const HOME_ROWS = ["trending", "popular-movies", "new-releases", "top-rated", "action", "comedy", "horror", "popular-series", "action-series", "anime-airing", "anime-trending"];
+import {
+  movieboxSearch,
+  movieboxGetDetails
+} from "./lib/moviebox/index.js";
+import { discoverClientStream } from "./lib/client-provider.js";
 
 async function safeParseResponse(res) {
   const contentType = res.headers?.get?.("content-type") || "";
@@ -43,7 +46,7 @@ export async function request(path, options = {}) {
     let errorMsg = body?.message || body?.error;
     if (!errorMsg) {
       if (res.status === 502 || res.status === 503 || res.status === 504) {
-        errorMsg = `Backend server is unreachable or offline (HTTP ${res.status}). CineStream stream resolution requires the backend server to bridge and scrape provider links. Start the backend with 'npm run dev'.`;
+        errorMsg = `Backend server is unreachable or offline (HTTP ${res.status}).`;
       } else if (text && text.length <= 200 && !contentType.includes("html") && !text.startsWith("<")) {
         errorMsg = text;
       } else {
@@ -67,59 +70,52 @@ export async function request(path, options = {}) {
 }
 
 export async function fetchHomeSections(options = {}) {
-  try {
-    const data = await request("/api/home", options);
-    return data.rows.map((row) => ({ key: row.key, data: row }));
-  } catch {
-    // If backend is not running or returns an error, load directly from Stremio Cinemeta / Kitsu APIs
-    try {
-      const directRows = await fetchDirectHomeSections(options);
-      if (directRows && directRows.length > 0) {
-        return directRows;
-      }
-    } catch {
-      // Continue to per-row fallback
-    }
-
-    const results = await Promise.allSettled(
-      HOME_ROWS.map((key) =>
-        request(`/api/home/${key}`, options).then((data) => {
-          const row = Array.isArray(data.rows) ? data.rows[0] : data;
-          return { key, data: { ...row, key } };
-        })
-      )
-    );
-    const ok = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
-    return ok;
-  }
+  return await fetchDirectHomeSections(options);
 }
 
 export async function fetchSearch(q, options = {}) {
-  try {
-    return await request(`/api/search?q=${encodeURIComponent(q)}`, options);
-  } catch {
-    // Direct search fallback
-    const items = await directSearch(q, options);
-    return {
-      query: q,
-      count: items.length,
-      items
-    };
+  const trimmed = (q || "").trim();
+  if (!trimmed) {
+    return { query: q, count: 0, items: [] };
   }
+
+  // 1. MovieBox frontend search
+  try {
+    const movieboxItems = await movieboxSearch(trimmed, 1, options);
+    if (movieboxItems && movieboxItems.length > 0) {
+      return {
+        query: trimmed,
+        count: movieboxItems.length,
+        items: movieboxItems
+      };
+    }
+  } catch {
+    // fallback to Cinemeta / Kitsu catalog search
+  }
+
+  // 2. Direct catalog search fallback
+  const items = await directSearch(trimmed, options);
+  return {
+    query: trimmed,
+    count: items.length,
+    items
+  };
 }
 
 export async function fetchDetail(type, id, { provider, ...options } = {}) {
-  const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
-  try {
-    return await request(`/api/detail/${type}/${encodeURIComponent(id)}${query}`, options);
-  } catch {
-    // Direct detail fallback
-    const item = await directGetDetails(type, id, options);
-    return { item };
+  // If provider is MovieBox or id is a MovieBox numeric subjectId
+  if (provider === "MovieBox" || (typeof id === "string" && /^\d{10,25}$/.test(id))) {
+    try {
+      const item = await movieboxGetDetails(id, options);
+      return { item };
+    } catch {
+      // fallback
+    }
   }
-}
 
-import { discoverClientStream } from "./lib/client-provider.js";
+  const item = await directGetDetails(type, id, options);
+  return { item };
+}
 
 export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, year, imdbId, signal, ...options } = {}) {
   return await discoverClientStream(
@@ -141,6 +137,6 @@ export async function createStream(type = "movie", id = "direct", { lang, provid
   );
 }
 
-export function cleanupStream(sessionId) {
-  return request(`/api/stream/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => null);
+export function cleanupStream() {
+  return Promise.resolve();
 }

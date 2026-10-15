@@ -4,6 +4,14 @@ import { detectFormatFromUrl } from "./source-detector.js";
 // Clearly defines which providers/tasks run client-side in the browser vs genuinely require the backend server.
 
 export const PROVIDERS = {
+  MovieBox: {
+    id: "moviebox",
+    name: "MovieBox",
+    execution: "client",
+    description: "Frontend-only stream discovery, multi-quality HLS, and multi-audio dubs ported from MovieBox-Tui with client-side CORS proxy support.",
+    supportedFormats: ["hls", "dash", "mp4"],
+    requiresBackend: false
+  },
   Direct: {
     id: "direct",
     name: "Direct Media",
@@ -25,7 +33,7 @@ export const PROVIDERS = {
     id: "vegamovies",
     name: "VegaMovies",
     execution: "backend-required",
-    description: "Protected HTML scraper. Genuinely requires the Node.js backend because target domains lack CORS headers, block browser User-Agents, and require custom Referer/Cookie headers.",
+    description: "Legacy HTML scraper replaced by frontend-only MovieBox. Required the Node.js backend because target domains lack CORS headers and block browser User-Agents.",
     supportedFormats: ["mkv", "mp4"],
     requiresBackend: true,
     backendReasons: [
