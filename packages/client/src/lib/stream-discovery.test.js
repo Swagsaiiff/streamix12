@@ -5,6 +5,7 @@ import {
   MovieBoxSourceProvider,
   SourceDiscoveryEngine
 } from "./source-providers/index.js";
+import { buildWebEmbedUrl } from "./source-providers/moviebox-source-provider.js";
 
 test("DirectSourceProvider resolves explicit media URLs accurately", async () => {
   const provider = new DirectSourceProvider();
@@ -25,7 +26,28 @@ test("MovieBoxSourceProvider is registered as primary provider in SourceDiscover
   assert.equal(moviebox.isAvailable(), true);
 });
 
-test("SourceDiscoveryEngine returns clean Stream Not Available error on failure", async () => {
+test("buildWebEmbedUrl constructs dynamic embed URLs using TMDB ID", () => {
+  const movieEmbed = buildWebEmbedUrl({ tmdbId: 550, type: "movie" });
+  assert.equal(movieEmbed, "https://vidsrc.to/embed/movie/550");
+
+  const tvEmbed = buildWebEmbedUrl({ tmdbId: 1399, type: "series", season: 2, episode: 5 });
+  assert.equal(tvEmbed, "https://vidsrc.to/embed/tv/1399/2/5");
+});
+
+test("MovieBoxSourceProvider falls back to Web Embed when direct stream is not found", async () => {
+  const provider = new MovieBoxSourceProvider();
+  const res = await provider.resolveStreams({
+    tmdbId: 550,
+    title: "Fight Club",
+    type: "movie"
+  });
+
+  assert.ok(res.sources.length > 0);
+  const stream = res.sources[0];
+  assert.ok(stream.url.includes("vidsrc.to/embed/movie/550") || stream.url.includes("moviebox"));
+});
+
+test("SourceDiscoveryEngine returns clean Stream Not Available error on failure when no TMDB ID or streams exist", async () => {
   const engine = new SourceDiscoveryEngine();
 
   await assert.rejects(

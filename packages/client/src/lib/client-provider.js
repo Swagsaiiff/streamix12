@@ -2,12 +2,20 @@ import { detectFormatFromUrl } from "./source-detector.js";
 
 // STREAMIX Provider Capabilities & Execution Boundary
 export const PROVIDERS = {
+  TMDB: {
+    id: "tmdb",
+    name: "The Movie Database (TMDB)",
+    execution: "client",
+    description: "Official TMDB API for catalog browsing, trending feeds, row categories, search, and comprehensive movie/TV metadata.",
+    supportedFormats: ["metadata"],
+    requiresBackend: false
+  },
   MovieBox: {
     id: "moviebox",
     name: "MovieBox",
     execution: "client",
-    description: "Frontend-only stream discovery, multi-quality HLS, and multi-audio dubs ported from MovieBox-Tui with client-side CORS proxy support.",
-    supportedFormats: ["hls", "dash", "mp4"],
+    description: "Frontend-only stream discovery, multi-quality HLS, and multi-audio dubs ported from MovieBox-Tui with client-side CORS proxy support and Web Embed fallback.",
+    supportedFormats: ["hls", "dash", "mp4", "embed"],
     requiresBackend: false
   },
   Direct: {
@@ -17,15 +25,6 @@ export const PROVIDERS = {
     description: "Plays CORS-enabled MP4, WebM, HLS (.m3u8), and DASH (.mpd) directly in the browser player without server involvement.",
     supportedFormats: ["mp4", "webm", "hls", "dash"],
     requiresBackend: false
-  },
-  CineStream: {
-    id: "cinestream",
-    name: "CineStream (Cinemeta / Kitsu)",
-    execution: "client-first",
-    description: "Catalog browsing, rows, search, and episode metadata run 100% client-side via public CORS-enabled APIs.",
-    supportedFormats: ["mp4", "webm", "hls", "dash", "metadata"],
-    requiresBackend: false,
-    requiresBackendForStreams: false
   }
 };
 
@@ -56,7 +55,8 @@ export function getStreamResolutionPlan(item) {
     item.url ||
     (item.sourceUrl &&
       !item.sourceUrl.endsWith(".json") &&
-      !item.sourceUrl.includes("/meta/")
+      !item.sourceUrl.includes("/meta/") &&
+      !item.sourceUrl.includes("api.themoviedb.org")
         ? item.sourceUrl
         : null);
 
@@ -75,7 +75,6 @@ export function getStreamResolutionPlan(item) {
     }
   }
 
-  // MovieBox is the primary provider for all catalog items client-side
   return {
     canResolveClientSide: true,
     sourceUrl: null,

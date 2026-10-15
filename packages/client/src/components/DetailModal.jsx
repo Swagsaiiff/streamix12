@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getStreamResolutionPlan } from "../lib/client-provider.js";
+import { tmdbGetSeasonEpisodes } from "../api.js";
 
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -20,6 +21,8 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
   const restoreRef = useRef(null);
   const containerRef = useRef(null);
   const [selectedSeason, setSelectedSeason] = useState(null);
+  const [seasonEpisodesCache, setSeasonEpisodesCache] = useState({});
+  const [loadingSeason, setLoadingSeason] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -54,7 +57,15 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
     };
   }, [onClose, suppressEscape]);
 
+  // Derive seasons from detail.seasons (TMDB) or detail.episodes
   const seasons = useMemo(() => {
+    if (Array.isArray(detail?.seasons) && detail.seasons.length > 0) {
+      return detail.seasons.map((s) => ({
+        season: s.season,
+        name: s.name,
+        episodeCount: s.episodeCount || 0
+      }));
+    }
     if (!detail?.episodes || detail.episodes.length === 0) return [];
     const map = new Map();
     for (const ep of detail.episodes) {
@@ -63,7 +74,12 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
       map.set(ep.season, list);
     }
     return Array.from(map.entries())
-      .map(([season, episodes]) => ({ season, episodes }))
+      .map(([season, episodes]) => ({
+        season,
+        name: `Season ${season}`,
+        episodeCount: episodes.length,
+        episodes
+      }))
       .sort((a, b) => a.season - b.season);
   }, [detail]);
 
@@ -74,6 +90,48 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
     }
     setSelectedSeason((prev) => (prev != null && seasons.some((s) => s.season === prev) ? prev : seasons[0].season));
   }, [seasons]);
+
+  // Populate cache with initial episodes if already present
+  useEffect(() => {
+    if (Array.isArray(detail?.episodes) && detail.episodes.length > 0) {
+      const firstEpSeason = detail.episodes[0].season;
+      setSeasonEpisodesCache((prev) => ({
+        ...prev,
+        [firstEpSeason]: detail.episodes
+      }));
+    }
+  }, [detail]);
+
+  // When selectedSeason changes, fetch episodes if not already cached
+  useEffect(() => {
+    if (!selectedSeason || !detail?.tmdbId || (detail?.type !== "series" && item?.type !== "series")) return;
+    if (seasonEpisodesCache[selectedSeason]) return;
+
+    let cancelled = false;
+    setLoadingSeason(true);
+    tmdbGetSeasonEpisodes(detail.tmdbId, selectedSeason)
+      .then((eps) => {
+        if (cancelled) return;
+        setSeasonEpisodesCache((prev) => ({
+          ...prev,
+          [selectedSeason]: eps
+        }));
+        setLoadingSeason(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadingSeason(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSeason, detail, item]);
+
+  const activeSeasonEpisodes = useMemo(() => {
+    if (!selectedSeason) return [];
+    if (seasonEpisodesCache[selectedSeason]) return seasonEpisodesCache[selectedSeason];
+    return (detail?.episodes || []).filter((ep) => ep.season === selectedSeason);
+  }, [selectedSeason, seasonEpisodesCache, detail]);
 
   const backdrop = detail?.backdrop ?? item.backdrop ?? detail?.poster ?? item.poster;
   const poster = detail?.poster ?? item.poster;
@@ -90,9 +148,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
   const writer = detail?.writer ?? null;
   const awards = detail?.awards ?? null;
   const isSeries = (detail?.type ?? item.type) === "series";
-  const activeSeason = seasons.find((s) => s.season === selectedSeason) ?? null;
-  const episodeCount = detail?.episodes?.length ?? 0;
-  const resolutionPlan = useMemo(() => getStreamResolutionPlan(detail || item), [detail, item]);
+  const episodeCount = detail?.numberOfEpisodes || detail?.episodes?.length || 0;
 
   return (
     <div
@@ -147,7 +203,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                   {resumeInfo && (
                     <button
                       className="btn btn-secondary"
-                      onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}), restart: true })}
+                      onClick={() => onPlay?.({ ...(item || {}), ...(detail || {}) , restart: true })}
                     >
                       Start over
                     </button>
@@ -167,16 +223,22 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
           )}
 
           {state === "error" && (
-            <p className="err">Could not load details from the provider. You can still try playing this title.</p>
+            <div className="detail-error">
+              <p>Failed to load title details.</p>
+              <button
+                className="btn btn-play"
+                onClick={() => onPlay?.(item)}
+              >
+                Play Anyway
+              </button>
+            </div>
           )}
 
           {state === "done" && (
             <>
-              {overview && <p className="modal-overview">{overview}</p>}
+              {overview && <p className="detail-overview">{overview}</p>}
 
-              <div className="detail-meta-grid">
-                <MetaItem label="Type" value={isSeries ? "Series" : "Movie"} />
-                <MetaItem label="Released" value={detail?.released ? String(detail.released).slice(0, 10) : year ? String(year) : null} />
+              <div className="detail-meta">
                 <MetaItem label="Runtime" value={runtime} />
                 <MetaItem label="Country" value={country} />
                 <MetaItem label="Language" value={language} />
@@ -198,7 +260,7 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                             <select value={selectedSeason ?? ""} onChange={(e) => setSelectedSeason(Number(e.target.value))}>
                               {seasons.map((s) => (
                                 <option key={s.season} value={s.season}>
-                                  Season {s.season} ({s.episodes.length})
+                                  Season {s.season} {s.episodeCount ? `(${s.episodeCount} eps)` : ""}
                                 </option>
                               ))}
                             </select>
@@ -206,59 +268,67 @@ export default function DetailModal({ modal, onClose, onPlay, suppressEscape = f
                         ) : (
                           <h3>Season {seasons[0].season}</h3>
                         )}
-                        <span className="muted">{activeSeason?.episodes.length ?? 0} episodes</span>
+                        <span className="muted">{activeSeasonEpisodes.length} episodes</span>
                       </div>
-                      <ul className="episode-grid">
-                        {activeSeason?.episodes.map((ep) => (
-                          <li key={ep.id ?? `${ep.season}-${ep.episode}`}>
-                            <button
-                              type="button"
-                              className="episode-card"
-                              onClick={() =>
-                                onPlay?.({
-                                  ...(item || {}),
-                                  ...(detail || {}),
-                                  type: "series",
-                                  season: ep.season,
-                                  episode: ep.episode,
-                                  episodeTitle: ep.name ?? null,
-                                  poster: ep.thumbnail ?? item.poster
-                                })
-                              }
-                            >
-                              <span className="episode-thumb">
-                                {ep.thumbnail ? (
-                                  <img
-                                    src={ep.thumbnail}
-                                    alt=""
-                                    loading="lazy"
-                                    onError={(e) => {
-                                      e.currentTarget.style.visibility = "hidden";
-                                    }}
-                                  />
-                                ) : (
-                                  <span className="episode-thumb-fallback">{ep.episode}</span>
-                                )}
-                              </span>
-                              <span className="episode-body">
-                                <span className="episode-head">
-                                  <span className="episode-num">E{ep.episode}</span>
-                                  <span className="episode-name">{ep.name ?? `Episode ${ep.episode}`}</span>
+                      {loadingSeason ? (
+                        <div className="detail-loading" style={{ minHeight: "100px" }}>
+                          <div className="player-spinner" aria-hidden="true" />
+                          <p className="muted">Loading season episodes…</p>
+                        </div>
+                      ) : (
+                        <ul className="episode-grid">
+                          {activeSeasonEpisodes.map((ep) => (
+                            <li key={ep.id ?? `${ep.season}-${ep.episode}`}>
+                              <button
+                                type="button"
+                                className="episode-card"
+                                onClick={() =>
+                                  onPlay?.({
+                                    ...(item || {}),
+                                    ...(detail || {}),
+                                    type: "series",
+                                    tmdbId: detail?.tmdbId || item?.tmdbId,
+                                    imdbId: detail?.imdbId || item?.imdbId,
+                                    season: ep.season,
+                                    episode: ep.episode,
+                                    episodeTitle: ep.name ?? null,
+                                    poster: ep.thumbnail ?? item.poster
+                                  })
+                                }
+                              >
+                                <span className="episode-thumb">
+                                  {ep.thumbnail ? (
+                                    <img
+                                      src={ep.thumbnail}
+                                      alt=""
+                                      loading="lazy"
+                                      onError={(e) => {
+                                        e.currentTarget.style.visibility = "hidden";
+                                      }}
+                                    />
+                                  ) : (
+                                    <span className="episode-thumb-fallback">{ep.episode}</span>
+                                  )}
                                 </span>
-                                <span className="episode-sub">
-                                  {ep.firstAired ? String(ep.firstAired).slice(0, 10) : ""}
-                                  {ep.rating ? ` · ★ ${ep.rating}` : ""}
-                                  {!ep.firstAired && !ep.rating ? "Air date unavailable" : ""}
+                                <span className="episode-body">
+                                  <span className="episode-head">
+                                    <span className="episode-num">E{ep.episode}</span>
+                                    <span className="episode-name">{ep.name ?? `Episode ${ep.episode}`}</span>
+                                  </span>
+                                  <span className="episode-sub">
+                                    {ep.firstAired ? String(ep.firstAired).slice(0, 10) : ""}
+                                    {ep.rating ? ` · ★ ${ep.rating}` : ""}
+                                  </span>
+                                  {ep.overview && <span className="episode-overview">{ep.overview}</span>}
                                 </span>
-                                {ep.overview && <span className="episode-overview">{ep.overview}</span>}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </>
                   ) : (
-                    <p className="muted">Episode information is not available from the provider for this title.</p>
+                    <p className="muted">No episode data available for this series.</p>
                   )}
                 </section>
               )}

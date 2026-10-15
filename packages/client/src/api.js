@@ -1,76 +1,36 @@
 import {
-  fetchDirectHomeSections,
-  directSearch,
-  directGetDetails
-} from "./lib/direct-catalog.js";
+  getTmdbHomeRowDefinitions,
+  tmdbSearch,
+  tmdbGetDetails,
+  tmdbGetSeasonEpisodes
+} from "./lib/tmdb-catalog.js";
 import {
   movieboxSearch,
   movieboxGetDetails
 } from "./lib/moviebox/index.js";
 import { discoverClientStream } from "./lib/client-provider.js";
 
-async function safeParseResponse(res) {
-  const contentType = res.headers?.get?.("content-type") || "";
-  let text = "";
-  try {
-    text = await res.text();
-  } catch {
-    text = "";
-  }
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return { data: null, text: "", contentType };
-  }
-  if (contentType.includes("application/json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      return { data: JSON.parse(trimmed), text: trimmed, contentType };
-    } catch {
-      return { data: null, text: trimmed, contentType };
-    }
-  }
-  return { data: null, text: trimmed, contentType };
-}
-
-export async function request(path, options = {}) {
-  let res;
-  try {
-    res = await fetch(path, options);
-  } catch (err) {
-    if (err.name === "AbortError") throw err;
-    throw new Error(`Network error connecting to ${path}: ${err.message}`);
-  }
-
-  const { data: body, text, contentType } = await safeParseResponse(res);
-
-  if (!res.ok) {
-    let errorMsg = body?.message || body?.error;
-    if (!errorMsg) {
-      if (res.status === 502 || res.status === 503 || res.status === 504) {
-        errorMsg = `Backend server is unreachable or offline (HTTP ${res.status}).`;
-      } else if (text && text.length <= 200 && !contentType.includes("html") && !text.startsWith("<")) {
-        errorMsg = text;
-      } else {
-        errorMsg = `Request failed with status ${res.status}${res.statusText ? ` (${res.statusText})` : ""}`;
-      }
-    }
-    const err = new Error(errorMsg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-
-  if (body === null) {
-    if (res.status === 204 || !text) {
-      return {};
-    }
-    throw new Error(`Expected JSON from ${path}, received ${res.headers.get("content-type") || "non-JSON content"}`);
-  }
-
-  return body;
-}
+export { tmdbGetSeasonEpisodes };
 
 export async function fetchHomeSections(options = {}) {
-  return await fetchDirectHomeSections(options);
+  const rowDefs = getTmdbHomeRowDefinitions();
+  const results = await Promise.allSettled(
+    rowDefs.map(async (def) => {
+      const items = await def.fetch(options);
+      return {
+        data: {
+          key: def.key,
+          title: def.title,
+          ranking: def.ranking,
+          items
+        }
+      };
+    })
+  );
+
+  return results
+    .filter((r) => r.status === "fulfilled" && Array.isArray(r.value?.data?.items) && r.value.data.items.length > 0)
+    .map((r) => r.value);
 }
 
 export async function fetchSearch(q, options = {}) {
@@ -79,7 +39,21 @@ export async function fetchSearch(q, options = {}) {
     return { query: q, count: 0, items: [] };
   }
 
-  // 1. MovieBox frontend search
+  // Search official TMDB first (movies & tv shows)
+  try {
+    const tmdbItems = await tmdbSearch(trimmed, options);
+    if (tmdbItems && tmdbItems.length > 0) {
+      return {
+        query: trimmed,
+        count: tmdbItems.length,
+        items: tmdbItems
+      };
+    }
+  } catch {
+    // fallback to MovieBox search
+  }
+
+  // MovieBox frontend search fallback
   try {
     const movieboxItems = await movieboxSearch(trimmed, 1, options);
     if (movieboxItems && movieboxItems.length > 0) {
@@ -90,20 +64,28 @@ export async function fetchSearch(q, options = {}) {
       };
     }
   } catch {
-    // fallback to Cinemeta / Kitsu catalog search
+    // empty
   }
 
-  // 2. Direct catalog search fallback
-  const items = await directSearch(trimmed, options);
   return {
     query: trimmed,
-    count: items.length,
-    items
+    count: 0,
+    items: []
   };
 }
 
 export async function fetchDetail(type, id, { provider, ...options } = {}) {
-  // If provider is MovieBox or id is a MovieBox numeric subjectId
+  // If numeric or TMDB item, fetch from TMDB API
+  if (provider === "TMDB" || /^\d{1,9}$/.test(String(id))) {
+    try {
+      const item = await tmdbGetDetails(type, id, options);
+      return { item };
+    } catch {
+      // fallback
+    }
+  }
+
+  // If MovieBox subjectId (numeric string >= 10 chars)
   if (provider === "MovieBox" || (typeof id === "string" && /^\d{10,25}$/.test(id))) {
     try {
       const item = await movieboxGetDetails(id, options);
@@ -113,18 +95,24 @@ export async function fetchDetail(type, id, { provider, ...options } = {}) {
     }
   }
 
-  const item = await directGetDetails(type, id, options);
+  // Default to TMDB details
+  const item = await tmdbGetDetails(type, id, options);
   return { item };
 }
 
-export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, year, imdbId, signal, ...options } = {}) {
+export async function createStream(type = "movie", id = "direct", { lang, provider, season, episode, sourceUrl, mediaType, title, year, release_year, imdbId, tmdbId, signal, ...options } = {}) {
+  const numericTmdbId = tmdbId || (typeof id === "number" || /^\d{1,9}$/.test(String(id)) ? Number(id) : null);
+  const resolvedImdbId = imdbId || (typeof id === "string" && id.startsWith("tt") ? id : null);
+
   return await discoverClientStream(
     {
       type,
       id,
+      tmdbId: numericTmdbId,
+      imdbId: resolvedImdbId,
       title,
-      year,
-      imdbId: imdbId || (typeof id === "string" && id.startsWith("tt") ? id : null),
+      year: year || release_year,
+      release_year: release_year || year,
       provider,
       season,
       episode,

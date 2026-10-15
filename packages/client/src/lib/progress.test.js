@@ -12,11 +12,11 @@ function fakeStorage() {
   };
 }
 
-const movie = { provider: "CineStream", type: "movie", id: "tt1", title: "Dune", poster: "p.jpg" };
+const movie = { provider: "TMDB", type: "movie", id: "550", title: "Fight Club", poster: "p.jpg" };
 
 test("progressKey distinguishes movies and episodes", () => {
-  assert.equal(progressKey(movie), "CineStream:movie:tt1");
-  assert.equal(progressKey({ ...movie, season: 1, episode: 3 }), "CineStream:movie:tt1:s1e3");
+  assert.equal(progressKey(movie), "TMDB:movie:550");
+  assert.equal(progressKey({ ...movie, season: 1, episode: 3 }), "TMDB:movie:550:s1e3");
 });
 
 test("save stores position and duration and lists the entry", () => {
@@ -25,7 +25,7 @@ test("save stores position and duration and lists the entry", () => {
   assert.equal(saved.position, 120);
   assert.equal(saved.duration, 600);
   assert.equal(store.list().length, 1);
-  assert.equal(store.get(movie).title, "Dune");
+  assert.equal(store.get(movie).title, "Fight Club");
 });
 
 test("resume data persists across store instances (localStorage round trip)", () => {

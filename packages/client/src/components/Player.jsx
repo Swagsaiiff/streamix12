@@ -87,6 +87,7 @@ export default function Player({ item, onClose, onProgress }) {
   const [sourceStatus, setSourceStatus] = useState(null);
   const [sourceProvider, setSourceProvider] = useState(null);
   const [playbackMode, setPlaybackMode] = useState("direct");
+  const [embedStreamUrl, setEmbedStreamUrl] = useState(null);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [resumedFrom, setResumedFrom] = useState(null);
   const [ended, setEnded] = useState(false);
@@ -190,8 +191,10 @@ export default function Player({ item, onClose, onProgress }) {
           {
             type: playItem.type || "movie",
             id: playItem.id,
+            tmdbId: playItem.tmdbId || (typeof playItem.id === "number" || /^\d{1,9}$/.test(String(playItem.id)) ? Number(playItem.id) : null),
             title: playItem.title,
-            year: playItem.year,
+            year: playItem.year || playItem.release_year,
+            release_year: playItem.release_year || playItem.year,
             imdbId: playItem.imdb_id || playItem.imdbId || (String(playItem.id).startsWith("tt") ? playItem.id : null),
             season: playItem.season,
             episode: playItem.episode,
@@ -252,6 +255,16 @@ export default function Player({ item, onClose, onProgress }) {
         if (!rawSourceUrl) {
           throw new Error("No playable media URL returned for this source");
         }
+
+        // Web Embed fallback handling (renders via iframe)
+        if (stream.isEmbed || stream.mediaType === "embed" || rawSourceUrl.includes("/embed/")) {
+          setPlaybackMode("embed");
+          setEmbedStreamUrl(rawSourceUrl);
+          setPhase("ready");
+          return;
+        }
+
+        setEmbedStreamUrl(null);
 
         // Probe media source to inspect response, status, content-type and initial bytes
         let probe = await probeMediaSource(rawSourceUrl, {
@@ -938,7 +951,18 @@ export default function Player({ item, onClose, onProgress }) {
       onMouseMove={bumpControls}
       onTouchStart={bumpControls}
     >
-      <video ref={videoRef} className="player-video" playsInline onClick={togglePlay} onDoubleClick={toggleFullscreen} />
+      {playbackMode === "embed" && embedStreamUrl ? (
+        <iframe
+          src={embedStreamUrl}
+          className="player-video player-embed-iframe"
+          title={`Playing ${displayTitle}`}
+          allowFullScreen
+          allow="autoplay; encrypted-media; fullscreen"
+          style={{ width: "100%", height: "100%", border: "none", background: "#000" }}
+        />
+      ) : (
+        <video ref={videoRef} className="player-video" playsInline onClick={togglePlay} onDoubleClick={toggleFullscreen} />
+      )}
 
       {(phase === "resolving" || switching) && (
         <div className="player-center">
@@ -1036,6 +1060,9 @@ export default function Player({ item, onClose, onProgress }) {
             </span>
             {sourceStatus === "fixture_fallback" && <span className="player-test-badge">TEST MODE</span>}
             {sourceStatus === "direct_stream" && <span className="player-live-badge" style={{ background: "#059669" }}>Client Direct</span>}
+            {playbackMode === "embed" && (
+              <span className="player-live-badge" style={{ background: "#8b5cf6" }}>Web Embed Stream</span>
+            )}
             {playbackMode === "client-remux" && (
               <span className="player-test-badge" style={{ background: "rgba(16, 185, 129, 0.2)", color: "#6ee7b7", border: "1px solid rgba(16, 185, 129, 0.4)" }}>
                 FastStart MP4 Remux

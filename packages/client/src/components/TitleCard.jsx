@@ -40,7 +40,7 @@ export default function TitleCard({ item, onClick, progress = null }) {
         {item.year ? ` · ${item.year}` : ""}
         {item.rating ? ` · ${item.rating}` : ""}
       </span>
-      {item.provider && item.provider !== "CineStream" && (
+      {item.provider && item.provider !== "TMDB" && (
         <span className="card-provider">{item.provider}</span>
       )}
     </button>

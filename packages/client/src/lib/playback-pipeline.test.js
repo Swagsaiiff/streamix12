@@ -105,12 +105,12 @@ test("playback position preservation clamps position within real duration", () =
 
 test("progressKey preserves episode tracking without cross-title collision", () => {
   const movieKey = progressKey({ provider: "Direct", type: "movie", id: "sample-clip" });
-  const ep1Key = progressKey({ provider: "CineStream", type: "series", id: "tt13444408", season: 1, episode: 1 });
-  const ep2Key = progressKey({ provider: "CineStream", type: "series", id: "tt13444408", season: 1, episode: 2 });
+  const ep1Key = progressKey({ provider: "TMDB", type: "series", id: "1399", season: 1, episode: 1 });
+  const ep2Key = progressKey({ provider: "TMDB", type: "series", id: "1399", season: 1, episode: 2 });
 
   assert.equal(movieKey, "Direct:movie:sample-clip");
-  assert.equal(ep1Key, "CineStream:series:tt13444408:s1e1");
-  assert.equal(ep2Key, "CineStream:series:tt13444408:s1e2");
+  assert.equal(ep1Key, "TMDB:series:1399:s1e1");
+  assert.equal(ep2Key, "TMDB:series:1399:s1e2");
   assert.notEqual(ep1Key, ep2Key);
 });
 

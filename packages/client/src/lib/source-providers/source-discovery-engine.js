@@ -15,8 +15,8 @@ export class SourceDiscoveryEngine {
 
   /**
    * Discovers the best browser-accessible stream for the requested title or episode.
-   * MovieBox is the primary streaming provider.
-   * @param {object} item { type, id, title, year, season, episode, streamUrl, sourceUrl, mediaType }
+   * MovieBox is the primary streaming provider with automatic Web Embed fallback.
+   * @param {object} item { type, id, tmdbId, imdbId, title, year, release_year, season, episode, streamUrl, sourceUrl, mediaType }
    * @param {object} options Resolution options (signal, lang, etc.)
    * @returns {Promise<object>} Playable stream descriptor
    */
@@ -47,11 +47,14 @@ export class SourceDiscoveryEngine {
             streamModeReason: "discovered_browser_stream",
             sourceUrl: playable.url,
             mediaType: playable.format !== "auto" ? playable.format : (item.mediaType || null),
+            isEmbed: Boolean(playable.isEmbed),
             qualities: playable.qualities || null,
             audioTracks: playable.audioTracks || [],
             subtitles: playable.subtitles || [],
             headers: playable.headers || {},
             title: playable.title || item.title || null,
+            tmdbId: item.tmdbId ?? null,
+            imdbId: item.imdbId ?? null,
             year: item.year ?? null,
             season: item.season ?? null,
             episode: item.episode ?? null,
